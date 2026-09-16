@@ -1,0 +1,31 @@
+# Environment and secrets — never commit real values
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+.coverage
+htmlcov/
+
+# Tooling
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Local data
+*.sqlite3
+pgdata/

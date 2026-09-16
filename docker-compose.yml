@@ -1,0 +1,49 @@
+# One command brings the whole stack up (M0 exit criterion):
+#   docker compose up --build
+# The api service migrates and seeds synthetic data before serving.
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-clinic}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-locally}
+      POSTGRES_DB: ${POSTGRES_DB:-clinic}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-clinic} -d ${POSTGRES_DB:-clinic}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      APP_ENV: ${APP_ENV:-local}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      POSTGRES_USER: ${POSTGRES_USER:-clinic}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-locally}
+      POSTGRES_DB: ${POSTGRES_DB:-clinic}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      APP_DB_USER: ${APP_DB_USER:-clinic_app}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:-change-me-locally}
+      PHI_ENCRYPTION_KEY: ${PHI_ENCRYPTION_KEY:-local-dev-key-not-for-production-0000}
+      PHI_BLIND_INDEX_KEY: ${PHI_BLIND_INDEX_KEY:-local-dev-bidx-not-for-production-000}
+      ALLOW_REAL_PATIENT_DATA: ${ALLOW_REAL_PATIENT_DATA:-false}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-60}
+    command: >
+      sh -c "alembic upgrade head &&
+             python -m scripts.seed_synthetic &&
+             python -m src.api.run --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+
+volumes:
+  pgdata:
