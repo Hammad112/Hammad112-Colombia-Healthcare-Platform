@@ -22,11 +22,10 @@ paths = [
 
 [[allowlists]]
 description = """
-Deterministic, non-secret placeholder keys used by the test suite and the
-example environment file. These unlock nothing: they exist so tests are
-reproducible and so a developer can see the shape of a value. Real keys are
-resolved at runtime from the secrets manager, and the application refuses to
-start on a placeholder outside local environments (see src/core/config.py).
+Non-secret placeholder values used by the test suite, CI, the example
+environment file and docker-compose. They unlock nothing. Real values are
+supplied through the environment or SECRETS_DIR, and the application refuses to
+start staging or production on a placeholder (see src/core/config.py).
 """
 paths = [
   '''^tests/conftest\.py$''',
@@ -35,10 +34,7 @@ paths = [
   '''^docker-compose\.yml$''',
 ]
 regexes = [
-  '''test-key-[A-Za-z0-9]*''',
-  '''test-bidx-[A-Za-z0-9]*''',
-  '''ci-key-[A-Za-z0-9]*''',
-  '''ci-bidx-[A-Za-z0-9]*''',
+  '''placeholder-(test|ci)-phi-(encryption|blind-index)-value''',
   '''local-dev-(key|bidx)-not-for-production-\d*''',
   '''change-me-locally''',
   '''ci-password''',

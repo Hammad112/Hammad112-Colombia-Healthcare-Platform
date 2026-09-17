@@ -57,6 +57,7 @@ jobs:
       POSTGRES_PASSWORD: ci-password
       APP_DB_USER: clinic_app
       APP_DB_PASSWORD: ci-app-password
+      # Placeholders for CI's throwaway database, not secrets.
       PHI_ENCRYPTION_KEY: placeholder-ci-phi-encryption-value
       PHI_BLIND_INDEX_KEY: placeholder-ci-phi-blind-index-value
       ALLOW_REAL_PATIENT_DATA: "false"

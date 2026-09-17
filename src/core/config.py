@@ -35,7 +35,7 @@ from sqlalchemy.engine import URL
 
 AppEnv = Literal["local", "ci", "staging", "production"]
 
-_PLACEHOLDER_PREFIXES = ("local-dev-", "test-", "ci-", "change-me")
+_PLACEHOLDER_PREFIXES = ("local-dev-", "placeholder-", "test-", "ci-", "change-me")
 _MIN_KEY_LENGTH = 32
 
 

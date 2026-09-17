@@ -15,6 +15,8 @@ import os
 
 os.environ["APP_ENV"] = "ci"
 os.environ["ALLOW_REAL_PATIENT_DATA"] = "false"
+# Readable placeholders, not secrets. Worded so they cannot resemble a provider
+# API key format and trigger secret scanners.
 os.environ["PHI_ENCRYPTION_KEY"] = "placeholder-test-phi-encryption-value"
 os.environ["PHI_BLIND_INDEX_KEY"] = "placeholder-test-phi-blind-index-value"
 os.environ["POSTGRES_DB"] = os.environ.get("TEST_POSTGRES_DB", "clinic_test")

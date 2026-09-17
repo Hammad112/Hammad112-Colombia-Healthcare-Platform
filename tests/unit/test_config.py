@@ -29,6 +29,7 @@ def test_production_accepts_strong_secrets() -> None:
     [
         {"phi_encryption_key": "short"},
         {"phi_blind_index_key": "local-dev-bidx-not-for-production-00000000"},
+        {"phi_encryption_key": "placeholder-test-phi-encryption-value"},
         {"postgres_password": ""},
         {"app_db_password": "change-me-locally-app"},
     ],
