@@ -1,136 +1,171 @@
 # Clinic Scheduler
 
-AI-powered medical appointment scheduling for small and medium clinics in Colombia.
+AI-powered appointment scheduling for small and medium clinics in Colombia.
 
-Patients receive appointment reminders on their usual messaging app, reply by text or
-voice note to confirm, cancel or reschedule, and the agent negotiates a new time against
-the doctor's real availability. Every message a model writes is checked by an independent
+The planned product sends patients appointment reminders on WhatsApp, understands text
+and voice replies to confirm, cancel or reschedule, and offers new times from each
+doctor's real availability. Every model-written message is checked by an independent
 evaluator before it reaches a patient.
 
-**Current status: M0 (Foundations) complete.** No patient-facing behaviour yet.
+**Status: milestone M0 (foundations).** This repository contains the data model,
+encryption, audit logging, database provisioning, LangGraph checkpoint storage, a
+read-only review API over synthetic data, and CI. No patient messaging exists yet.
 
 ---
 
-## Quick start
+## Requirements
 
-Everything starts from one file, `main.py`. You need Python 3.12+ and a running
-PostgreSQL 16+ on your machine (the standard Windows installer includes everything needed).
+- Python 3.12 or newer
+- PostgreSQL 16 or newer, running, with an account allowed to create databases and
+  roles (the default `postgres` superuser is). The `btree_gist` extension ships with
+  standard PostgreSQL installers.
+
+## Run
 
 ```bash
 python -m venv .venv
 .venv\Scripts\activate          # macOS/Linux: source .venv/bin/activate
 pip install -e ".[dev]"
-cp .env.example .env              # set POSTGRES_USER / POSTGRES_PASSWORD for your PostgreSQL
+cp .env.example .env              # then set POSTGRES_PASSWORD to your postgres password
 
 python main.py
 ```
 
-`main.py` connects to PostgreSQL, creates the `clinic` database if it does not exist,
-applies migrations, seeds synthetic data (local only, and only into an empty database),
-then starts the API. Open http://127.0.0.1:8000/docs, or:
+`main.py` is the single entry point. Each step is safe to repeat:
 
-```bash
-curl http://127.0.0.1:8000/healthz     # {"status":"ok"}
-curl http://127.0.0.1:8000/readyz      # database reachable, compliance gate reported
+```
+[1/6] Database localhost:5432/clinic ...     created if missing
+[2/6] Runtime role 'clinic_app' ...          created, or password aligned with .env
+[3/6] Applying migrations ...
+[4/6] Checkpoint schema ...                  LangGraph tables in the `conversation` schema
+[5/6] Seeding synthetic data ...             only into an empty database, local/CI only
+[6/6] API on http://127.0.0.1:8000
 ```
 
-It is safe to run repeatedly. Options:
+Then open http://127.0.0.1:8000/docs.
 
-| Flag | Effect |
+| Option | Effect |
 |---|---|
-| `--host 0.0.0.0` | Bind address (default `127.0.0.1`) |
-| `--port 8000` | Port (default `8000`) |
-| `--skip-migrate` | Do not run migrations |
+| `--host`, `--port` | Bind address and port (default `127.0.0.1:8000`) |
 | `--skip-seed` | Do not seed synthetic data |
-| `--reload` | Auto-reload on code changes (not supported on Windows) |
+| `--no-serve` | Run every step except starting the API |
+| `--reset-db` | Drop and recreate the database first. Refused unless `APP_ENV` is `local` or `ci` and `ALLOW_REAL_PATIENT_DATA=false` |
+| `--reload` | Restart the API when source files change |
 
-A `docker-compose.yml` is also provided for anyone who prefers containers; it runs the same `main.py`.
+A `docker-compose.yml` is provided as an alternative; it runs the same `main.py`.
+
+## Configuration
+
+Settings are read from the environment, then `.env`, then one file per setting in the
+directory named by `SECRETS_DIR` (the format Docker secrets, Kubernetes secret mounts and
+Vault Agent produce). See [`.env.example`](.env.example) for every setting.
+
+Two database accounts are used on purpose:
+
+| Account | Settings | Used by | Privileges |
+|---|---|---|---|
+| Owner | `POSTGRES_USER`, `POSTGRES_PASSWORD` | `main.py`, migrations | Creates the database, schema and runtime role |
+| Runtime | `APP_DB_USER`, `APP_DB_PASSWORD` | The API and the seeder | Read and write application tables; only read and insert on the audit log |
+
+In `staging` and `production` the application refuses to start if the encryption keys
+are shorter than 32 characters or placeholders, or if either database password is
+missing or a placeholder.
 
 ## Reviewing the data
 
-With `python main.py` running, browse http://127.0.0.1:8000/docs and open the
-**review** section, or call the endpoints directly. All are read-only `GET`s.
+The review API is read-only and enabled only when `APP_ENV` is `local` or `ci` and
+`ALLOW_REAL_PATIENT_DATA=false`. Otherwise a GET to any `/review` route responds 404,
+and `/docs` and `/openapi.json` are not served.
+
+It has no authentication. `python main.py` listens on 127.0.0.1 by default, and
+`docker-compose.yml` publishes the port on the host's loopback interface only. Do not
+expose it to a network.
 
 | Endpoint | Returns |
 |---|---|
-| `/review/summary` | Row counts per table and appointments by status |
-| `/review/clinics` | Clinics |
-| `/review/locations` | Locations (`?clinic_id=`) |
-| `/review/appointment-types` | Appointment types and durations |
-| `/review/doctors` | Doctors, paginated (`?specialty=`, `?clinic_id=`) |
-| `/review/doctors/{doctor_id}` | A doctor with weekly availability rules, exceptions and upcoming bookings |
-| `/review/patients` | Patients, paginated. Exact lookup by `?phone=+57...` or `?document_number=` through the blind index |
-| `/review/patients/{patient_id}` | A patient with consents, phone bindings and appointments |
-| `/review/appointments` | Appointments, paginated (`?doctor_id=`, `?patient_id=`, `?status=`, `?date_from=`, `?date_to=`) |
-| `/review/appointments/{appointment_id}` | One appointment, times in Bogotá local time |
-| `/review/consents` | Consent records (`?patient_id=`, `?purpose=`, `?active_only=true`) |
-| `/review/phone-bindings/shared` | Handsets shared by several patients, without revealing the number |
-| `/review/audit-log` | Audit entries, newest first (`?patient_id=`, `?action=`, `?resource=`) |
-| `/review/audit-log/verify` | Recomputes the hash chain; `intact: true` means no row was altered or removed |
+| `GET /review/summary` | Row counts per table and appointments per status |
+| `GET /review/clinics` | Clinics |
+| `GET /review/locations` | Locations (`clinic_id`) |
+| `GET /review/appointment-types` | Appointment types (`clinic_id`) |
+| `GET /review/doctors` | Doctors, paginated (`clinic_id`, `specialty` substring) |
+| `GET /review/doctors/{doctor_id}` | A doctor with weekly availability, exceptions and count of upcoming active appointments |
+| `GET /review/patients` | Patients, paginated (`clinic_id`; exact `phone` in E.164 or `document_number`) |
+| `GET /review/patients/{patient_id}` | A patient with consents, phone bindings and appointments |
+| `GET /review/appointments` | Appointments, paginated (`clinic_id`, `doctor_id`, `patient_id`, `status`, `date_from`, `date_to`) |
+| `GET /review/appointments/{appointment_id}` | One appointment; start and end in Bogotá time |
+| `GET /review/consents` | Consents, paginated (`patient_id`, `purpose`, `active_only`) |
+| `GET /review/phone-bindings/shared` | Phone numbers shared by several patients, identified by an opaque reference |
+| `GET /review/audit-log` | Audit entries, newest first (`patient_id`, `action`, `resource`) |
+| `GET /review/audit-log/verify` | Recomputes the audit hash chain; `intact: false` means an entry was altered, or one before the newest was removed or inserted |
+| `GET /healthz` | Process is running |
+| `GET /readyz` | Database reachable as the runtime role; reports the real-data gate |
 
-**Safeguards, because staff login does not exist until M11:**
+Paginated endpoints accept `limit` (1-200, default 50) and `offset`.
 
-- These routes exist only when `APP_ENV` is `local` or `ci` and `ALLOW_REAL_PATIENT_DATA=false`.
-  Anywhere else they return 404.
-- Document numbers, phone numbers and emails are masked in every response.
-- Every read of patient data writes an audit row, so reviewing the data is itself visible in
-  `/review/audit-log`. A test fails the build if any patient-data route stops doing this.
-- Names are encrypted at rest, so there is no name search; lookups use exact phone or document number.
+Safeguards while staff authentication does not exist (it arrives in M11):
 
-## Commands
+- Document and phone numbers show only their last four characters; emails show only the
+  first character and the domain.
+- Every patient-data read writes an audit entry attributed to `local-reviewer`.
+- Names and identifiers are encrypted at rest, so there is no name search; lookups by
+  phone or document number are exact matches through HMAC blind indexes.
 
-| Command | What it does |
-|---|---|
-| `python main.py` | Migrate, seed and serve: the single entry point |
-| `docker compose up --build` | Whole stack in containers, via the same `main.py` |
-| `alembic upgrade head` | Apply migrations |
-| `python -m scripts.seed_synthetic` | Seed synthetic data (refuses to run if real data is enabled) |
-| `pytest -q` | All tests (uses a separate `clinic_test` database, never your data) |
-| `pytest tests/test_schema_constraints.py -q` | Proves overlapping bookings are impossible |
-| `pytest tests/test_audit.py -q` | Proves the audit log is append-only |
-| `ruff check . && mypy src` | Lint and types |
-| `gitleaks detect --no-git -c .gitleaks.toml` | Proves no secrets in the tree |
+## What M0 guarantees, and the test that proves each
 
-Tests that need a database skip automatically when none is reachable, so `pytest` is
-always runnable. CI runs them against a real PostgreSQL service, so they are never
-silently skipped where it matters.
+| Guarantee | Enforced by | Proven by |
+|---|---|---|
+| No overlapping active bookings or holds for a doctor, even under concurrent writes | PostgreSQL exclusion constraint | `tests/integration/test_constraints.py` |
+| Every patient-data read through the API is audited | Repositories record each access | `tests/integration/test_review_api.py` |
+| The application cannot rewrite the audit log | Runtime role granted only SELECT and INSERT; a trigger also rejects UPDATE and DELETE from any role | `tests/integration/test_migrations.py` |
+| An altered audit entry, or one removed or inserted before the newest, is detected | SHA-256 hash chain covering every field except the entry's id and hashes | `tests/integration/test_audit_service.py` |
+| Audit entries commit before the response is sent | Request session closes when the endpoint returns | `tests/unit/test_error_handling.py` |
+| The database schema matches the models | Hand-written migration; tables, columns, indexes, keys, CHECK and exclusion constraints compared | `tests/integration/test_migrations.py` |
+| Direct identifiers are stored as ciphertext | AES-256-GCM per column | `tests/integration/test_review_api.py`, `tests/unit/test_crypto.py` |
+| Soft-deleted patients appear in no patient query | Repository filters | `tests/integration/test_review_api.py` |
+| The review API is unavailable outside synthetic-data mode | Access dependency; OpenAPI document not served | `tests/unit/test_review_access.py`, `tests/unit/test_error_handling.py` |
+| No secrets in source control | gitleaks in CI and pre-commit | CI job `Secret scan` |
 
-## What M0 delivers
+## Tests and checks
 
-| Exit criterion (from the scope) | How to verify |
-|---|---|
-| All services start from a clean checkout with one command | `python main.py` (or `docker compose up --build`), then `curl /healthz` |
-| No secret values in source control, verified by a scan | `gitleaks detect --no-git`; CI fails the build on any finding |
-| Base schema migrated and seedable with synthetic data | `alembic upgrade head && python -m scripts.seed_synthetic` |
+```bash
+pytest -q                                   # unit and integration tests
+ruff check . && ruff format --check .       # lint and formatting
+mypy src main.py                            # strict type checking
+```
 
-Beyond the scope's list, M0 also lands the things that are cheap now and expensive to
-retrofit later: multi-tenant scoping, the consent table, the append-only audit schema,
-request-scoped audit context, column encryption with a blind index for lookup, rate
-limiting, body-size limits, and the exclusion constraint that makes double-booking
-structurally impossible.
+Integration tests never touch the application database. They drop, recreate and
+provision a separate `clinic_test` database at the start of each run, using the same
+steps as `main.py`. If PostgreSQL is unreachable they are skipped and the reason is shown.
 
 ## Layout
 
 ```
-src/
-  api/        FastAPI app, routers, edge middleware
-  audit/      append-only audit context and writer
-  core/       settings, database, logging, encryption
-  models/     SQLAlchemy models (app and audit schemas)
-migrations/   Alembic; exclusion constraints are hand-written
-scripts/      synthetic data seeding
-tests/        unit tests, plus integration tests gated on a live database
+main.py              entry point
+src/bootstrap.py     database, runtime role, migrations
+src/core/            settings, database, encryption, logging, pagination, time zone
+src/audit/           audit context, access log model, recording and verification
+src/registry/        clinics, locations, doctors, patients
+src/identity/        phone bindings, consents
+src/scheduling/      appointment types, availability, appointments
+src/conversation/    LangGraph checkpoint storage
+src/devdata/         synthetic data seeder
+src/api/             application factory, middleware, health, review API
+migrations/          Alembic migrations
+tests/               unit/ and integration/
 ```
 
-## Security and compliance notes
+## Known limitations at M0
 
-- **No real patient data** may be processed until the compliance package is signed.
-  `ALLOW_REAL_PATIENT_DATA` defaults to `false` and the seeder refuses to run when it is true.
-- **No credentials in the repository.** Local values live in `.env`, which is gitignored.
-  Staging and production resolve secrets at runtime, and the application refuses to start
-  with a development key outside local environments.
-- **Patient data never reaches the logs.** Direct identifiers are redacted by a log processor.
-- Health data is sensitive personal data under Colombian law. See `ARCHITECTURE.md` §12.
+- Clinics are not isolated from each other yet. Every table except `clinics` has `clinic_id`, but
+  queries take it only as an optional filter and row-level security is not enabled. Isolation
+  arrives with staff authentication.
+- The audit hash chain has no secret key and no external anchor, so removal of the newest entries,
+  truncation by the owner account, or a fully recomputed chain is not detected.
+- Rate limiting is kept in process memory, so each API worker enforces its own limit.
+- Checkpoint storage exists, but checkpoint encryption and expiry arrive with the conversation graph in M3.
+- The document type list is a working subset pending confirmation against the RIPS code table.
+- Staff authentication does not exist. The review API is the only data interface, is enabled only
+  in synthetic-data mode, and must not be exposed to a network.
 
 ## License
 

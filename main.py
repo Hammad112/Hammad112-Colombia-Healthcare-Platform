@@ -1,24 +1,26 @@
-"""Single entry point for the platform.
+"""Single entry point: provision the database, seed synthetic data, serve the API.
 
-    python main.py
+    python main.py [options]
 
-Runs, in order:
-  1. Connects to PostgreSQL using the settings in `.env`, and creates the
-     application database if it does not exist yet.
-  2. Applies database migrations (alembic upgrade head).
-  3. Seeds synthetic data, only in local/CI environments with the real-data gate
-     closed, and only if the database is empty (safe to run repeatedly).
-  4. Starts the API server.
+Steps, in order. Every step is safe to repeat.
+
+  1. Connect to PostgreSQL as the owner account and create POSTGRES_DB if missing.
+  2. Create the runtime role APP_DB_USER, or set its password to the configured value.
+  3. Apply database migrations.
+  4. Create the LangGraph checkpoint schema.
+  5. Seed synthetic data, if in synthetic-data mode and the database has no clinic.
+  6. Start the API.
 
 Options:
-    --host 0.0.0.0      bind address (default 127.0.0.1)
-    --port 8000         port (default 8000)
-    --skip-migrate      do not run migrations
-    --skip-seed         do not seed synthetic data
-    --reload            auto-reload on code changes (not supported on Windows)
+  --host HOST     bind address (default 127.0.0.1)
+  --port PORT     port (default 8000)
+  --skip-seed     skip step 5
+  --no-serve      stop after step 5; used by CI
+  --reset-db      drop and recreate the database first; synthetic-data mode only
+  --reload        restart the API when source files change
 
-Requires a running PostgreSQL 16+ (with the standard btree_gist extension).
-Configuration comes from `.env` (copy `.env.example`). See README.md.
+Configuration is read from the environment, `.env` and SECRETS_DIR; see
+src/core/config.py and .env.example.
 """
 
 from __future__ import annotations
@@ -26,111 +28,76 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
-
-
-def _ensure_database() -> None:
-    """Connect to the server and create the application database if missing."""
-    import psycopg
-    from psycopg import sql
-
-    from src.core.config import get_settings
-
-    s = get_settings()
-    try:
-        # Connect to the always-present maintenance database to check for ours.
-        with psycopg.connect(
-            host=s.postgres_host,
-            port=s.postgres_port,
-            user=s.postgres_user,
-            password=s.postgres_password.get_secret_value(),
-            dbname="postgres",
-            connect_timeout=5,
-            autocommit=True,  # CREATE DATABASE cannot run inside a transaction
-        ) as conn:
-            exists = conn.execute(
-                "SELECT 1 FROM pg_database WHERE datname = %s", (s.postgres_db,)
-            ).fetchone()
-            if exists:
-                print(f"      Database '{s.postgres_db}' found.")
-            else:
-                conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(s.postgres_db)))
-                print(f"      Database '{s.postgres_db}' created.")
-    except psycopg.OperationalError as exc:
-        print(
-            f"\nCannot connect to PostgreSQL at {s.postgres_host}:{s.postgres_port} "
-            f"as '{s.postgres_user}'.\n"
-            f"  {str(exc).strip().splitlines()[-1]}\n\n"
-            "Check that PostgreSQL is running, and that POSTGRES_HOST, POSTGRES_PORT,\n"
-            "POSTGRES_USER and POSTGRES_PASSWORD in .env are correct.",
-            file=sys.stderr,
-        )
-        raise SystemExit(1) from None
+from src import bootstrap
+from src.api.server import serve
+from src.conversation.checkpointer import ensure_checkpoint_schema
+from src.core.config import get_settings
+from src.core.db import configure_event_loop_policy
 
 
-def _migrate() -> None:
-    from alembic import command
-    from alembic.config import Config
-
-    cfg = Config(str(ROOT / "alembic.ini"))
-    cfg.set_main_option("script_location", str(ROOT / "migrations"))
-    command.upgrade(cfg, "head")
-
-
-def _seed() -> None:
-    from scripts.seed_synthetic import seed
-    from src.core.db import dispose_engine
-
-    async def run() -> None:
-        try:
-            await seed(n_patients=200, n_doctors=8)
-        finally:
-            await dispose_engine()  # the server opens its own engine in its own loop
-
-    asyncio.run(run())
-
-
-def main() -> None:
+def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the clinic scheduling platform")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--skip-migrate", action="store_true")
     parser.add_argument("--skip-seed", action="store_true")
+    parser.add_argument("--no-serve", action="store_true")
+    parser.add_argument("--reset-db", action="store_true")
     parser.add_argument("--reload", action="store_true")
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    from src.api.run import serve
-    from src.core.config import get_settings
-    from src.core.db import configure_event_loop_policy
 
+def main() -> None:
+    args = _parse_args()
     configure_event_loop_policy()
     settings = get_settings()
+    target = f"{settings.postgres_host}:{settings.postgres_port}/{settings.postgres_db}"
 
-    print(
-        f"[1/4] Connecting to PostgreSQL at {settings.postgres_host}:{settings.postgres_port} ..."
-    )
-    _ensure_database()
+    try:
+        if args.reset_db:
+            print(f"[0/6] Dropping and recreating {target} (synthetic data only) ...")
+            bootstrap.reset_database(settings)
 
-    if args.skip_migrate:
-        print("[2/4] Migrations skipped.")
+        print(f"[1/6] Database {target} ...")
+        created = bootstrap.ensure_database(settings)
+        print("      created." if created else "      exists.")
+
+        print(f"[2/6] Runtime role '{settings.app_db_user}' ...")
+        bootstrap.ensure_runtime_role(settings)
+
+        print("[3/6] Applying migrations ...")
+        bootstrap.run_migrations()
+
+        print("[4/6] Checkpoint schema ...")
+        asyncio.run(ensure_checkpoint_schema(settings))
+    except bootstrap.ProvisioningError as exc:
+        print(f"\n{exc}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    if args.skip_seed:
+        print("[5/6] Seeding skipped (--skip-seed).")
+    elif not settings.synthetic_data_mode:
+        print(f"[5/6] Seeding skipped (APP_ENV={settings.app_env} or real patient data enabled).")
     else:
-        print("[2/4] Applying migrations ...")
-        _migrate()
+        print("[5/6] Seeding synthetic data ...")
+        # Imported here: the seeder needs Faker, which production installs omit.
+        from src.devdata.seed import run_seed
 
-    seeding_allowed = settings.app_env in ("local", "ci") and not settings.allow_real_patient_data
-    if args.skip_seed or not seeding_allowed:
-        reason = (
-            "--skip-seed" if args.skip_seed else f"APP_ENV={settings.app_env} or real data enabled"
-        )
-        print(f"[3/4] Seeding skipped ({reason}).")
-    else:
-        print("[3/4] Seeding synthetic data (skipped automatically if data exists) ...")
-        _seed()
+        report = asyncio.run(run_seed())
+        if report is None:
+            print("      database already has data; nothing seeded.")
+        else:
+            print(
+                f"      {report.doctors} doctors, {report.patients} patients, "
+                f"{report.appointments} appointments."
+            )
 
-    print(f"[4/4] Starting API on http://{args.host}:{args.port}  (docs: /docs, health: /healthz)")
-    serve(args.host, args.port, args.reload)
+    if args.no_serve:
+        print("[6/6] Not serving (--no-serve).")
+        return
+
+    print(f"[6/6] API on http://{args.host}:{args.port}  (docs: /docs, health: /healthz)")
+    serve(args.host, args.port, reload=args.reload)
 
 
 if __name__ == "__main__":

@@ -1,23 +1,24 @@
-# One command brings the whole stack up (M0 exit criterion):
+# Optional container setup. The primary way to run locally is `python main.py`.
+#
 #   docker compose up --build
-# The api service runs main.py, which migrates, seeds synthetic data and serves.
+#
+# The api container runs the same main.py: provision, migrate, seed, serve.
 
 services:
   db:
     image: postgres:17-alpine
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-clinic}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-locally}
-      POSTGRES_DB: ${POSTGRES_DB:-clinic}
+      POSTGRES_DB: postgres
     ports:
-      # Host port follows POSTGRES_PORT in .env (default 5433, so it does not clash
-      # with a PostgreSQL already installed on 5432). The api container always
-      # talks to db:5432 on the internal network, whatever this is set to.
-      - "${POSTGRES_PORT:-5433}:5432"
+      # Host port 5433 by default, so it does not collide with a PostgreSQL
+      # already listening on 5432. Containers reach the database at db:5432.
+      - "${DB_HOST_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-clinic} -d ${POSTGRES_DB:-clinic}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d postgres"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -30,21 +31,22 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-local}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      POSTGRES_USER: ${POSTGRES_USER:-clinic}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-locally}
-      POSTGRES_DB: ${POSTGRES_DB:-clinic}
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-clinic}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-locally}
       APP_DB_USER: ${APP_DB_USER:-clinic_app}
-      APP_DB_PASSWORD: ${APP_DB_PASSWORD:-change-me-locally}
-      PHI_ENCRYPTION_KEY: ${PHI_ENCRYPTION_KEY:-local-dev-key-not-for-production-0000}
-      PHI_BLIND_INDEX_KEY: ${PHI_BLIND_INDEX_KEY:-local-dev-bidx-not-for-production-000}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:-change-me-locally-app}
+      PHI_ENCRYPTION_KEY: ${PHI_ENCRYPTION_KEY:-local-dev-key-not-for-production-000000000}
+      PHI_BLIND_INDEX_KEY: ${PHI_BLIND_INDEX_KEY:-local-dev-bidx-not-for-production-00000000}
       ALLOW_REAL_PATIENT_DATA: ${ALLOW_REAL_PATIENT_DATA:-false}
       RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-60}
-    # main.py migrates, seeds (local only) and serves: the same single entry point as local runs.
     command: ["python", "main.py", "--host", "0.0.0.0", "--port", "8000"]
     ports:
-      - "8000:8000"
+      # Published on the host's loopback interface only. The review API has no
+      # authentication, so it must not be reachable from other machines.
+      - "127.0.0.1:8000:8000"
 
 volumes:
   pgdata:

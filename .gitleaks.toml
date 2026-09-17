@@ -42,4 +42,5 @@ regexes = [
   '''local-dev-(key|bidx)-not-for-production-\d*''',
   '''change-me-locally''',
   '''ci-password''',
+  '''ci-app-password''',
 ]

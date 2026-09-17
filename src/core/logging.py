@@ -1,7 +1,9 @@
-"""Structured JSON logging.
+"""Structured JSON logging with redaction of known identifier fields.
 
-Patient data must never reach the logs. `scrub_pii` drops the keys that carry
-direct identifiers; anything genuinely needed for debugging is referenced by id.
+Redaction is by key name: a value logged under one of `_REDACTED_KEYS` is
+replaced with "[redacted]". It does not inspect free text, so patient data
+must never be interpolated into the event message itself; log identifiers
+such as `patient_id` instead.
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ from typing import Any
 
 import structlog
 
-_FORBIDDEN_KEYS = frozenset(
+_REDACTED_KEYS = frozenset(
     {
         "phone",
         "phone_e164",
@@ -24,35 +26,39 @@ _FORBIDDEN_KEYS = frozenset(
         "message_body",
         "transcript",
         "prompt",
+        "password",
     }
 )
 
 
-def scrub_pii(
+def redact_identifiers(
     _logger: Any, _method: str, event_dict: MutableMapping[str, Any]
 ) -> MutableMapping[str, Any]:
     for key in list(event_dict):
-        if key.lower() in _FORBIDDEN_KEYS:
+        if key.lower() in _REDACTED_KEYS:
             event_dict[key] = "[redacted]"
     return event_dict
 
 
 def configure_logging(level: str = "INFO") -> None:
-    logging.basicConfig(format="%(message)s", level=getattr(logging, level.upper(), logging.INFO))
+    numeric_level = logging.getLevelName(level.upper())
+    if not isinstance(numeric_level, int):
+        numeric_level = logging.INFO
+    logging.basicConfig(format="%(message)s", level=numeric_level)
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
-            scrub_pii,
+            redact_identifiers,
+            structlog.processors.format_exc_info,
             structlog.processors.JSONRenderer(),
         ],
-        wrapper_class=structlog.make_filtering_bound_logger(
-            getattr(logging, level.upper(), logging.INFO)
-        ),
+        wrapper_class=structlog.make_filtering_bound_logger(numeric_level),
         cache_logger_on_first_use=True,
     )
 
 
-def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
-    return structlog.get_logger(name)  # type: ignore[no-any-return]
+def get_logger(name: str | None = None) -> structlog.typing.FilteringBoundLogger:
+    logger: structlog.typing.FilteringBoundLogger = structlog.get_logger(name)
+    return logger
