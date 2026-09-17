@@ -204,7 +204,9 @@ def upgrade() -> None:
         sa.Column("valid_from", sa.Date, nullable=False),
         sa.Column("valid_until", sa.Date, nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
-        sa.CheckConstraint("end_time > start_time", name="ck_availability_rules_time_window_ordered"),
+        sa.CheckConstraint(
+            "end_time > start_time", name="ck_availability_rules_time_window_ordered"
+        ),
         sa.CheckConstraint("weekday BETWEEN 0 AND 6", name="ck_availability_rules_weekday_range"),
         schema="app",
     )
@@ -359,7 +361,9 @@ def downgrade() -> None:
     op.execute("DROP TRIGGER IF EXISTS access_log_append_only ON audit.access_log")
     op.execute("DROP FUNCTION IF EXISTS audit.reject_mutation()")
     op.drop_table("access_log", schema="audit")
-    op.execute("ALTER TABLE app.appointments DROP CONSTRAINT IF EXISTS no_overlapping_active_appointments")
+    op.execute(
+        "ALTER TABLE app.appointments DROP CONSTRAINT IF EXISTS no_overlapping_active_appointments"
+    )
     for table in (
         "appointments",
         "appointment_types",

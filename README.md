@@ -46,6 +46,37 @@ It is safe to run repeatedly. Options:
 
 A `docker-compose.yml` is also provided for anyone who prefers containers; it runs the same `main.py`.
 
+## Reviewing the data
+
+With `python main.py` running, browse http://127.0.0.1:8000/docs and open the
+**review** section, or call the endpoints directly. All are read-only `GET`s.
+
+| Endpoint | Returns |
+|---|---|
+| `/review/summary` | Row counts per table and appointments by status |
+| `/review/clinics` | Clinics |
+| `/review/locations` | Locations (`?clinic_id=`) |
+| `/review/appointment-types` | Appointment types and durations |
+| `/review/doctors` | Doctors, paginated (`?specialty=`, `?clinic_id=`) |
+| `/review/doctors/{doctor_id}` | A doctor with weekly availability rules, exceptions and upcoming bookings |
+| `/review/patients` | Patients, paginated. Exact lookup by `?phone=+57...` or `?document_number=` through the blind index |
+| `/review/patients/{patient_id}` | A patient with consents, phone bindings and appointments |
+| `/review/appointments` | Appointments, paginated (`?doctor_id=`, `?patient_id=`, `?status=`, `?date_from=`, `?date_to=`) |
+| `/review/appointments/{appointment_id}` | One appointment, times in Bogotá local time |
+| `/review/consents` | Consent records (`?patient_id=`, `?purpose=`, `?active_only=true`) |
+| `/review/phone-bindings/shared` | Handsets shared by several patients, without revealing the number |
+| `/review/audit-log` | Audit entries, newest first (`?patient_id=`, `?action=`, `?resource=`) |
+| `/review/audit-log/verify` | Recomputes the hash chain; `intact: true` means no row was altered or removed |
+
+**Safeguards, because staff login does not exist until M11:**
+
+- These routes exist only when `APP_ENV` is `local` or `ci` and `ALLOW_REAL_PATIENT_DATA=false`.
+  Anywhere else they return 404.
+- Document numbers, phone numbers and emails are masked in every response.
+- Every read of patient data writes an audit row, so reviewing the data is itself visible in
+  `/review/audit-log`. A test fails the build if any patient-data route stops doing this.
+- Names are encrypted at rest, so there is no name search; lookups use exact phone or document number.
+
 ## Commands
 
 | Command | What it does |
@@ -54,7 +85,7 @@ A `docker-compose.yml` is also provided for anyone who prefers containers; it ru
 | `docker compose up --build` | Whole stack in containers, via the same `main.py` |
 | `alembic upgrade head` | Apply migrations |
 | `python -m scripts.seed_synthetic` | Seed synthetic data (refuses to run if real data is enabled) |
-| `pytest -q` | All tests |
+| `pytest -q` | All tests (uses a separate `clinic_test` database, never your data) |
 | `pytest tests/test_schema_constraints.py -q` | Proves overlapping bookings are impossible |
 | `pytest tests/test_audit.py -q` | Proves the audit log is append-only |
 | `ruff check . && mypy src` | Lint and types |

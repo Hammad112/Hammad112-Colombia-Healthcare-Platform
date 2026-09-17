@@ -37,9 +37,7 @@ async def _fixture_graph(session: AsyncSession) -> dict[str, uuid.UUID]:
     doctor = Doctor(
         id=uuid.uuid4(), clinic_id=clinic.id, full_name="Dra. Prueba", specialty="Medicina General"
     )
-    location = Location(
-        id=uuid.uuid4(), clinic_id=clinic.id, name="Sede", address="Calle 1 # 2-3"
-    )
+    location = Location(id=uuid.uuid4(), clinic_id=clinic.id, name="Sede", address="Calle 1 # 2-3")
     appt_type = AppointmentType(
         id=uuid.uuid4(), clinic_id=clinic.id, name="Consulta", duration_minutes=20
     )

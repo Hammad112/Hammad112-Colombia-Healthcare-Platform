@@ -108,7 +108,9 @@ def main() -> None:
     configure_event_loop_policy()
     settings = get_settings()
 
-    print(f"[1/4] Connecting to PostgreSQL at {settings.postgres_host}:{settings.postgres_port} ...")
+    print(
+        f"[1/4] Connecting to PostgreSQL at {settings.postgres_host}:{settings.postgres_port} ..."
+    )
     _ensure_database()
 
     if args.skip_migrate:
@@ -119,7 +121,9 @@ def main() -> None:
 
     seeding_allowed = settings.app_env in ("local", "ci") and not settings.allow_real_patient_data
     if args.skip_seed or not seeding_allowed:
-        reason = "--skip-seed" if args.skip_seed else f"APP_ENV={settings.app_env} or real data enabled"
+        reason = (
+            "--skip-seed" if args.skip_seed else f"APP_ENV={settings.app_env} or real data enabled"
+        )
         print(f"[3/4] Seeding skipped ({reason}).")
     else:
         print("[3/4] Seeding synthetic data (skipped automatically if data exists) ...")

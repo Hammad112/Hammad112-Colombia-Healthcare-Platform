@@ -11,6 +11,14 @@ os.environ.setdefault("PHI_ENCRYPTION_KEY", "placeholder-test-phi-encryption-val
 os.environ.setdefault("PHI_BLIND_INDEX_KEY", "placeholder-test-phi-blind-index-value")
 os.environ.setdefault("ALLOW_REAL_PATIENT_DATA", "false")
 
+# Tests create and DROP tables. They must never touch the database the app runs
+# on, so they always use a separate one (default: clinic_test), created on demand.
+# Environment variables override .env, so this wins over POSTGRES_DB in .env.
+os.environ["POSTGRES_DB"] = os.environ.get("TEST_POSTGRES_DB", "clinic_test")
+assert os.environ["POSTGRES_DB"].endswith("_test"), (
+    "Refusing to run tests against a non-test database"
+)
+
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import (  # noqa: E402
     AsyncSession,
@@ -33,8 +41,33 @@ def database_available() -> bool:
     settings = get_settings()
     try:
         with socket.create_connection((settings.postgres_host, settings.postgres_port), timeout=1):
-            return True
+            pass
     except OSError:
+        return False
+    return _ensure_test_database()
+
+
+def _ensure_test_database() -> bool:
+    import psycopg
+    from psycopg import sql
+
+    s = get_settings()
+    try:
+        with psycopg.connect(
+            host=s.postgres_host,
+            port=s.postgres_port,
+            user=s.postgres_user,
+            password=s.postgres_password.get_secret_value(),
+            dbname="postgres",
+            connect_timeout=5,
+            autocommit=True,
+        ) as conn:
+            if not conn.execute(
+                "SELECT 1 FROM pg_database WHERE datname = %s", (s.postgres_db,)
+            ).fetchone():
+                conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(s.postgres_db)))
+        return True
+    except psycopg.OperationalError:
         return False
 
 

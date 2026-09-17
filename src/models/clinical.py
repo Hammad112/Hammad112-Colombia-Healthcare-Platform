@@ -57,9 +57,7 @@ class Clinic(UUIDPrimaryKey, Timestamped, Base):
 class Patient(UUIDPrimaryKey, Timestamped, Base):
     __tablename__ = "patients"
     __table_args__ = (
-        CheckConstraint(
-            "document_type IN " + str(DOCUMENT_TYPES), name="document_type_valid"
-        ),
+        CheckConstraint("document_type IN " + str(DOCUMENT_TYPES), name="document_type_valid"),
         Index(
             "ix_patients_clinic_phone_bidx",
             "clinic_id",
@@ -226,9 +224,7 @@ class Appointment(UUIDPrimaryKey, Timestamped, Base):
     patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("app.patients.id"))
     doctor_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("app.doctors.id"))
     location_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("app.locations.id"))
-    appointment_type_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("app.appointment_types.id")
-    )
+    appointment_type_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("app.appointment_types.id"))
     during: Mapped[object] = mapped_column(TSTZRANGE)
     status: Mapped[str] = mapped_column(String(20))
     # Set only for status='hold'; swept by a background job (M2).

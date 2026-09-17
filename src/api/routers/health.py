@@ -34,9 +34,7 @@ async def readyz(
         # Log the cause: a readiness probe that hides why it failed turns a
         # five-minute diagnosis into an hour of guessing.
         log.error("readiness_check_failed", error=str(exc), error_type=type(exc).__name__)
-        return JSONResponse(
-            {"status": "degraded", "database": "unreachable"}, status_code=503
-        )
+        return JSONResponse({"status": "degraded", "database": "unreachable"}, status_code=503)
     return {
         "status": "ok",
         "database": "ok",

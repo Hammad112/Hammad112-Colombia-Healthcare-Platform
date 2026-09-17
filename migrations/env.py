@@ -21,7 +21,9 @@ config.set_main_option("sqlalchemy.url", get_settings().database_url)
 target_metadata = [Base.metadata, AuditBase.metadata]
 
 
-def include_object(obj: object, name: str | None, type_: str, reflected: bool, compare_to: object) -> bool:  # noqa: ARG001
+def include_object(
+    obj: object, name: str | None, type_: str, reflected: bool, compare_to: object
+) -> bool:  # noqa: ARG001
     # Exclusion constraints are hand-written (autogenerate cannot detect them).
     return True
 

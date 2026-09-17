@@ -10,7 +10,7 @@ from src.api.middleware import (
     RateLimitMiddleware,
     RequestContextMiddleware,
 )
-from src.api.routers import health
+from src.api.routers import health, review
 from src.core.config import get_settings
 from src.core.db import dispose_engine
 from src.core.logging import configure_logging, get_logger
@@ -43,6 +43,8 @@ def create_app() -> FastAPI:
     app.add_middleware(BodySizeLimitMiddleware)
     app.add_middleware(RequestContextMiddleware)
     app.include_router(health.router)
+    # Read-only data review; returns 404 outside local/CI (see routers/review.py).
+    app.include_router(review.router)
     return app
 
 

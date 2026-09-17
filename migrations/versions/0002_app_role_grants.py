@@ -52,9 +52,7 @@ def upgrade() -> None:
     )
 
     op.execute(f'GRANT USAGE ON SCHEMA app TO "{role}"')
-    op.execute(
-        f'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA app TO "{role}"'
-    )
+    op.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA app TO "{role}"')
     op.execute(f'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA app TO "{role}"')
     op.execute(
         f'ALTER DEFAULT PRIVILEGES IN SCHEMA app GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO "{role}"'

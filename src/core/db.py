@@ -29,6 +29,7 @@ def configure_event_loop_policy() -> None:
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
+
 _engine: AsyncEngine | None = None
 _sessionmaker: async_sessionmaker[AsyncSession] | None = None
 
@@ -47,9 +48,7 @@ def get_engine() -> AsyncEngine:
 def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
     global _sessionmaker
     if _sessionmaker is None:
-        _sessionmaker = async_sessionmaker(
-            get_engine(), expire_on_commit=False, autoflush=False
-        )
+        _sessionmaker = async_sessionmaker(get_engine(), expire_on_commit=False, autoflush=False)
     return _sessionmaker
 
 
