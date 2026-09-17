@@ -1,0 +1,135 @@
+"""Application settings.
+
+Values are resolved by pydantic-settings in this order, highest priority first:
+
+1. Process environment variables.
+2. The `.env` file in the working directory.
+3. Secret files in the directory named by the `SECRETS_DIR` environment
+   variable: one file per setting, named after the field (for example
+   `postgres_password`). Docker secrets, the Kubernetes Secrets Store CSI
+   driver and Vault Agent all deliver secrets in this form, so a secrets
+   manager can supply credentials without code changes (ADR-10).
+4. The defaults declared below.
+
+Two database identities are used deliberately:
+
+* `postgres_*` is the owner account. It creates the database, runs migrations
+  and owns the schema. It is used only by `main.py` and Alembic.
+* `app_db_*` is the runtime account the API and the seeder connect as.
+  `bootstrap.ensure_runtime_role` creates it. The initial migration grants it
+  SELECT/INSERT/UPDATE/DELETE on `app` tables and only SELECT/INSERT on the
+  audit log; `ensure_checkpoint_schema` grants it access to checkpoint tables.
+"""
+
+from __future__ import annotations
+
+import os
+from functools import lru_cache
+from pathlib import Path
+from typing import Literal
+
+from psycopg.conninfo import make_conninfo
+from pydantic import Field, SecretStr, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import URL
+
+AppEnv = Literal["local", "ci", "staging", "production"]
+
+_PLACEHOLDER_PREFIXES = ("local-dev-", "placeholder-", "test-", "ci-", "change-me")
+_MIN_KEY_LENGTH = 32
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    app_env: AppEnv = "local"
+    log_level: str = "INFO"
+
+    # Owner account: database creation and migrations only.
+    postgres_host: str = "localhost"
+    postgres_port: int = 5432
+    postgres_db: str = "clinic"
+    postgres_user: str = "postgres"
+    postgres_password: SecretStr = SecretStr("")
+
+    # Runtime account used by the API and the seeder.
+    app_db_user: str = "clinic_app"
+    app_db_password: SecretStr = SecretStr("")
+
+    # Column encryption and blind-index keys. See src/core/crypto.py.
+    phi_encryption_key: SecretStr = SecretStr("")
+    phi_blind_index_key: SecretStr = SecretStr("")
+
+    # ADR-11 / ADR-15 gate. While false, only synthetic data may be processed.
+    allow_real_patient_data: bool = False
+
+    rate_limit_per_minute: int = Field(default=60, ge=1)
+
+    @property
+    def synthetic_data_mode(self) -> bool:
+        """True where synthetic seeding and the review API are permitted."""
+        return self.app_env in ("local", "ci") and not self.allow_real_patient_data
+
+    @property
+    def admin_database_url(self) -> URL:
+        return self._url(self.postgres_user, self.postgres_password)
+
+    @property
+    def app_database_url(self) -> URL:
+        return self._url(self.app_db_user, self.app_db_password)
+
+    def conninfo(self, *, admin: bool, dbname: str | None = None) -> str:
+        """A libpq connection string for a direct psycopg connection."""
+        user, password = (
+            (self.postgres_user, self.postgres_password)
+            if admin
+            else (self.app_db_user, self.app_db_password)
+        )
+        return make_conninfo(
+            host=self.postgres_host,
+            port=self.postgres_port,
+            dbname=dbname or self.postgres_db,
+            user=user,
+            password=password.get_secret_value(),
+        )
+
+    def _url(self, user: str, password: SecretStr) -> URL:
+        # URL.create escapes special characters in the password, which string
+        # formatting would not.
+        return URL.create(
+            drivername="postgresql+psycopg",
+            username=user,
+            password=password.get_secret_value(),
+            host=self.postgres_host,
+            port=self.postgres_port,
+            database=self.postgres_db,
+        )
+
+    @model_validator(mode="after")
+    def _require_real_secrets_outside_local(self) -> Settings:
+        """Refuse to start staging or production on missing or placeholder secrets."""
+        if self.app_env not in ("staging", "production"):
+            return self
+        for name in ("phi_encryption_key", "phi_blind_index_key"):
+            value = getattr(self, name).get_secret_value()
+            if len(value) < _MIN_KEY_LENGTH or value.startswith(_PLACEHOLDER_PREFIXES):
+                raise ValueError(
+                    f"{name} must be a random secret of at least {_MIN_KEY_LENGTH} characters "
+                    f"supplied by the secrets manager when APP_ENV={self.app_env}."
+                )
+        for name in ("postgres_password", "app_db_password"):
+            value = getattr(self, name).get_secret_value()
+            if not value or value.startswith(_PLACEHOLDER_PREFIXES):
+                raise ValueError(
+                    f"{name} is missing or a placeholder while APP_ENV={self.app_env}."
+                )
+        return self
+
+
+@lru_cache
+def get_settings() -> Settings:
+    secrets_dir = os.environ.get("SECRETS_DIR")
+    if secrets_dir and Path(secrets_dir).is_dir():
+        # `_secrets_dir` is a pydantic-settings init option that mypy cannot see.
+        return Settings(_secrets_dir=secrets_dir)  # type: ignore[call-arg]
+    return Settings()

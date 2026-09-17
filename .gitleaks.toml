@@ -1,0 +1,42 @@
+# Secret-scanning configuration.
+#
+# The allowlists below are deliberately narrow. Anything broader would defeat
+# the point of the scan, which is an M0 exit criterion: no secret values in
+# source control, verified automatically and enforced by a failing build.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Local virtualenvs, caches and build output are not our source"
+paths = [
+  '''(^|/)\.venv/''',
+  '''(^|/)venv/''',
+  '''(^|/)node_modules/''',
+  '''(^|/)\.mypy_cache/''',
+  '''(^|/)\.ruff_cache/''',
+  '''(^|/)\.pytest_cache/''',
+  '''(^|/)dist/''',
+  '''(^|/)build/''',
+]
+
+[[allowlists]]
+description = """
+Non-secret placeholder values used by the test suite, CI, the example
+environment file and docker-compose. They unlock nothing. Real values are
+supplied through the environment or SECRETS_DIR, and the application refuses to
+start staging or production on a placeholder (see src/core/config.py).
+"""
+paths = [
+  '''^tests/conftest\.py$''',
+  '''^\.env\.example$''',
+  '''^\.github/workflows/ci\.yml$''',
+  '''^docker-compose\.yml$''',
+]
+regexes = [
+  '''placeholder-(test|ci)-phi-(encryption|blind-index)-value''',
+  '''local-dev-(key|bidx)-not-for-production-\d*''',
+  '''change-me-locally''',
+  '''ci-password''',
+  '''ci-app-password''',
+]
