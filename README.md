@@ -31,7 +31,7 @@ cp .env.example .env              # then set POSTGRES_PASSWORD to your postgres 
 python main.py
 ```
 
-`main.py` is the single entry point. Each step is safe to repeat:
+`main.py` is the single entry point in the root. Each step is safe to repeat:
 
 ```
 [1/6] Database localhost:5432/clinic ...     created if missing
