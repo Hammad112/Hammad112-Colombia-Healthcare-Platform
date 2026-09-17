@@ -13,40 +13,45 @@ evaluator before it reaches a patient.
 
 ## Quick start
 
-One command brings up the database, applies migrations, seeds synthetic data and serves the API:
+Everything starts from one file, `main.py`. It checks the database, applies migrations,
+seeds synthetic data (local only, and only into an empty database), then starts the API.
 
 ```bash
-cp .env.example .env     # local development values; never commit .env
-docker compose up --build
-```
-
-Then:
-
-```bash
-curl http://localhost:8000/healthz     # {"status":"ok"}
-curl http://localhost:8000/readyz      # database reachable, compliance gate reported
-open http://localhost:8000/docs        # OpenAPI, local and CI environments only
-```
-
-## Local development without Docker
-
-Requires Python 3.12 or newer and a reachable PostgreSQL 16+ with the `btree_gist` extension available.
-
-```bash
-python -m venv .venv && source .venv/Scripts/activate   # Windows: .venv\Scripts\activate
+python -m venv .venv
+.venv\Scripts\activate          # macOS/Linux: source .venv/bin/activate
 pip install -e ".[dev]"
-cp .env.example .env                                     # then set POSTGRES_HOST=localhost
+cp .env.example .env              # set POSTGRES_HOST=localhost and your database credentials
 
-alembic upgrade head                                     # create schema
-python -m scripts.seed_synthetic                         # synthetic Colombian data
-python -m src.api.run --port 8000        # --reload is unsupported on Windows; see src/api/run.py
+python main.py
 ```
+
+Then open http://127.0.0.1:8000/docs, or:
+
+```bash
+curl http://127.0.0.1:8000/healthz     # {"status":"ok"}
+curl http://127.0.0.1:8000/readyz      # database reachable, compliance gate reported
+```
+
+`main.py` is safe to run repeatedly. Options:
+
+| Flag | Effect |
+|---|---|
+| `--host 0.0.0.0` | Bind address (default `127.0.0.1`) |
+| `--port 8000` | Port (default `8000`) |
+| `--skip-migrate` | Do not run migrations |
+| `--skip-seed` | Do not seed synthetic data |
+| `--reload` | Auto-reload on code changes (not supported on Windows) |
+
+It needs a reachable PostgreSQL 16+. If you do not have one, `docker compose up db -d`
+starts one, or run the whole stack in containers with `docker compose up --build`,
+which uses the same `main.py` inside the container.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `docker compose up --build` | Whole stack from a clean checkout |
+| `python main.py` | Migrate, seed and serve: the single entry point |
+| `docker compose up --build` | Whole stack in containers, via the same `main.py` |
 | `alembic upgrade head` | Apply migrations |
 | `python -m scripts.seed_synthetic` | Seed synthetic data (refuses to run if real data is enabled) |
 | `pytest -q` | All tests |
@@ -63,7 +68,7 @@ silently skipped where it matters.
 
 | Exit criterion (from the scope) | How to verify |
 |---|---|
-| All services start from a clean checkout with one command | `docker compose up --build`, then `curl /healthz` |
+| All services start from a clean checkout with one command | `python main.py` (or `docker compose up --build`), then `curl /healthz` |
 | No secret values in source control, verified by a scan | `gitleaks detect --no-git`; CI fails the build on any finding |
 | Base schema migrated and seedable with synthetic data | `alembic upgrade head && python -m scripts.seed_synthetic` |
 

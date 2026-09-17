@@ -1,6 +1,6 @@
 # One command brings the whole stack up (M0 exit criterion):
 #   docker compose up --build
-# The api service migrates and seeds synthetic data before serving.
+# The api service runs main.py, which migrates, seeds synthetic data and serves.
 
 services:
   db:
@@ -38,10 +38,8 @@ services:
       PHI_BLIND_INDEX_KEY: ${PHI_BLIND_INDEX_KEY:-local-dev-bidx-not-for-production-000}
       ALLOW_REAL_PATIENT_DATA: ${ALLOW_REAL_PATIENT_DATA:-false}
       RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-60}
-    command: >
-      sh -c "alembic upgrade head &&
-             python -m scripts.seed_synthetic &&
-             python -m src.api.run --host 0.0.0.0 --port 8000"
+    # main.py migrates, seeds (local only) and serves: the same single entry point as local runs.
+    command: ["python", "main.py", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "8000:8000"
 
