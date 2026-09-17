@@ -10,7 +10,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-locally}
       POSTGRES_DB: ${POSTGRES_DB:-clinic}
     ports:
-      - "5432:5432"
+      # Host port follows POSTGRES_PORT in .env (default 5433, so it does not clash
+      # with a PostgreSQL already installed on 5432). The api container always
+      # talks to db:5432 on the internal network, whatever this is set to.
+      - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:

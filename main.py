@@ -3,7 +3,8 @@
     python main.py
 
 Runs, in order:
-  1. Checks the database is reachable (clear message if not).
+  1. Connects to PostgreSQL using the settings in `.env`, and creates the
+     application database if it does not exist yet.
   2. Applies database migrations (alembic upgrade head).
   3. Seeds synthetic data, only in local/CI environments with the real-data gate
      closed, and only if the database is empty (safe to run repeatedly).
@@ -16,6 +17,7 @@ Options:
     --skip-seed         do not seed synthetic data
     --reload            auto-reload on code changes (not supported on Windows)
 
+Requires a running PostgreSQL 16+ (with the standard btree_gist extension).
 Configuration comes from `.env` (copy `.env.example`). See README.md.
 """
 
@@ -23,19 +25,49 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import socket
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 
 
-def _database_reachable(host: str, port: int) -> bool:
+def _ensure_database() -> None:
+    """Connect to the server and create the application database if missing."""
+    import psycopg
+    from psycopg import sql
+
+    from src.core.config import get_settings
+
+    s = get_settings()
     try:
-        with socket.create_connection((host, port), timeout=2):
-            return True
-    except OSError:
-        return False
+        # Connect to the always-present maintenance database to check for ours.
+        with psycopg.connect(
+            host=s.postgres_host,
+            port=s.postgres_port,
+            user=s.postgres_user,
+            password=s.postgres_password.get_secret_value(),
+            dbname="postgres",
+            connect_timeout=5,
+            autocommit=True,  # CREATE DATABASE cannot run inside a transaction
+        ) as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM pg_database WHERE datname = %s", (s.postgres_db,)
+            ).fetchone()
+            if exists:
+                print(f"      Database '{s.postgres_db}' found.")
+            else:
+                conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(s.postgres_db)))
+                print(f"      Database '{s.postgres_db}' created.")
+    except psycopg.OperationalError as exc:
+        print(
+            f"\nCannot connect to PostgreSQL at {s.postgres_host}:{s.postgres_port} "
+            f"as '{s.postgres_user}'.\n"
+            f"  {str(exc).strip().splitlines()[-1]}\n\n"
+            "Check that PostgreSQL is running, and that POSTGRES_HOST, POSTGRES_PORT,\n"
+            "POSTGRES_USER and POSTGRES_PASSWORD in .env are correct.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from None
 
 
 def _migrate() -> None:
@@ -76,16 +108,8 @@ def main() -> None:
     configure_event_loop_policy()
     settings = get_settings()
 
-    print(f"[1/4] Checking database at {settings.postgres_host}:{settings.postgres_port} ...")
-    if not _database_reachable(settings.postgres_host, settings.postgres_port):
-        print(
-            "\nDatabase is not reachable. Either:\n"
-            "  - start PostgreSQL and set POSTGRES_HOST / POSTGRES_PORT in .env, or\n"
-            "  - run 'docker compose up db -d' to start one (then set POSTGRES_HOST=localhost),\n"
-            "  - or run the whole stack with 'docker compose up --build'.",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
+    print(f"[1/4] Connecting to PostgreSQL at {settings.postgres_host}:{settings.postgres_port} ...")
+    _ensure_database()
 
     if args.skip_migrate:
         print("[2/4] Migrations skipped.")

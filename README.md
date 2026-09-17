@@ -13,26 +13,28 @@ evaluator before it reaches a patient.
 
 ## Quick start
 
-Everything starts from one file, `main.py`. It checks the database, applies migrations,
-seeds synthetic data (local only, and only into an empty database), then starts the API.
+Everything starts from one file, `main.py`. You need Python 3.12+ and a running
+PostgreSQL 16+ on your machine (the standard Windows installer includes everything needed).
 
 ```bash
 python -m venv .venv
 .venv\Scripts\activate          # macOS/Linux: source .venv/bin/activate
 pip install -e ".[dev]"
-cp .env.example .env              # set POSTGRES_HOST=localhost and your database credentials
+cp .env.example .env              # set POSTGRES_USER / POSTGRES_PASSWORD for your PostgreSQL
 
 python main.py
 ```
 
-Then open http://127.0.0.1:8000/docs, or:
+`main.py` connects to PostgreSQL, creates the `clinic` database if it does not exist,
+applies migrations, seeds synthetic data (local only, and only into an empty database),
+then starts the API. Open http://127.0.0.1:8000/docs, or:
 
 ```bash
 curl http://127.0.0.1:8000/healthz     # {"status":"ok"}
 curl http://127.0.0.1:8000/readyz      # database reachable, compliance gate reported
 ```
 
-`main.py` is safe to run repeatedly. Options:
+It is safe to run repeatedly. Options:
 
 | Flag | Effect |
 |---|---|
@@ -42,9 +44,7 @@ curl http://127.0.0.1:8000/readyz      # database reachable, compliance gate rep
 | `--skip-seed` | Do not seed synthetic data |
 | `--reload` | Auto-reload on code changes (not supported on Windows) |
 
-It needs a reachable PostgreSQL 16+. If you do not have one, `docker compose up db -d`
-starts one, or run the whole stack in containers with `docker compose up --build`,
-which uses the same `main.py` inside the container.
+A `docker-compose.yml` is also provided for anyone who prefers containers; it runs the same `main.py`.
 
 ## Commands
 
