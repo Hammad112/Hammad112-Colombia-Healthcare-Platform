@@ -77,8 +77,23 @@ class Settings(BaseSettings):
 
     @property
     def synthetic_data_mode(self) -> bool:
-        """True where synthetic seeding and the review API are permitted."""
+        """True in local and CI while real patient data is disabled.
+
+        Enables what is only safe on a developer's machine or a CI runner: the
+        unauthenticated review API and `--reset-db`. Synthetic seeding is broader;
+        see `synthetic_seeding_allowed`.
+        """
         return self.app_env in ("local", "ci") and not self.allow_real_patient_data
+
+    @property
+    def synthetic_seeding_allowed(self) -> bool:
+        """True in every environment until real patient data is enabled (ADR-11).
+
+        Until the compliance gate is signed, staging and production hold only
+        synthetic data too, so they must be seedable. Once real data is enabled,
+        synthetic records would be mixed with real ones, so seeding stops.
+        """
+        return not self.allow_real_patient_data
 
     @property
     def admin_database_url(self) -> URL:

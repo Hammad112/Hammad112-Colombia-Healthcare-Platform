@@ -38,7 +38,7 @@ python main.py
 [2/6] Runtime role 'clinic_app' ...          created, or password aligned with .env
 [3/6] Applying migrations ...
 [4/6] Checkpoint schema ...                  LangGraph tables in the `conversation` schema
-[5/6] Seeding synthetic data ...             only into an empty database, local/CI only
+[5/6] Seeding synthetic data ...             only into an empty database; see below
 [6/6] API on http://127.0.0.1:8000
 ```
 
@@ -48,17 +48,37 @@ Then open http://127.0.0.1:8000/docs.
 |---|---|
 | `--host`, `--port` | Bind address and port (default `127.0.0.1:8000`) |
 | `--skip-seed` | Do not seed synthetic data |
+| `--seed` | Seed synthetic data in `staging` or `production` (automatic only in `local` and `ci`) |
 | `--no-serve` | Run every step except starting the API |
 | `--reset-db` | Drop and recreate the database first. Refused unless `APP_ENV` is `local` or `ci` and `ALLOW_REAL_PATIENT_DATA=false` |
 | `--reload` | Restart the API when source files change |
 
 A `docker-compose.yml` is provided as an alternative; it runs the same `main.py`.
 
+### Synthetic data in every environment
+
+Until the compliance gate is signed (`ALLOW_REAL_PATIENT_DATA=false`), every environment
+holds synthetic data only, so every environment can be seeded:
+
+| `APP_ENV` | Seeding | Review API and `--reset-db` |
+|---|---|---|
+| `local`, `ci` | Automatic into an empty database | Enabled |
+| `staging`, `production` | Only with `--seed` (and the `seed` extra installed) | Disabled |
+
+Once `ALLOW_REAL_PATIENT_DATA=true`, seeding is refused everywhere, so synthetic records
+never sit beside real ones. The seeder enforces this itself, not only `main.py`.
+
 ## Configuration
 
 Settings are read from the environment, then `.env`, then one file per setting in the
 directory named by `SECRETS_DIR` (the format Docker secrets, Kubernetes secret mounts and
 Vault Agent produce). See [`.env.example`](.env.example) for every setting.
+
+This file interface is how the secrets manager is wired in: whichever one the hosting
+provider offers delivers its secrets as files into `SECRETS_DIR`, with no vendor SDK in the
+code. The choice of provider depends on where the platform is hosted, which is not yet
+decided; nothing in the code changes when it is. Outside `local` and `ci` the application
+refuses to start on a missing or placeholder secret.
 
 Two database accounts are used on purpose:
 
