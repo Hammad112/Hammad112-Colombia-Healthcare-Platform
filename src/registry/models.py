@@ -34,22 +34,35 @@ from src.core.db import Base, string_enum
 
 
 class DocumentType(StrEnum):
-    """Identification document types used in Colombian health records.
+    """The RIPS identification document types, in full.
 
-    This is a working subset. Confirm it against the RIPS identification code
-    table (Resolución 2275 de 2023) before M1 imports real clinic files.
+    These are the values of `tipoDocumentoIdentificacion` listed in MinSalud's
+    Documento Técnico 1 (versión de lanzamiento, 29 April 2026), which
+    Resolución 948 de 2026 made the authoritative table; that resolution
+    repealed Resolución 2275 de 2023. Codes are two uppercase letters.
+
+    Because the table now lives in a technical document rather than in the
+    resolution itself, it can change without a new norm. Re-check it before M1
+    imports real clinic files.
+
+    RIPS restricts some of these by context: CN, RC and MS identify newborns,
+    and AS and MS are not accepted on an electronic invoice. Those rules belong
+    to the import and billing paths, not to this enumeration.
     """
 
+    RC = "RC"  # Registro civil
+    TI = "TI"  # Tarjeta de identidad
     CC = "CC"  # Cédula de ciudadanía
     CE = "CE"  # Cédula de extranjería
-    TI = "TI"  # Tarjeta de identidad
-    RC = "RC"  # Registro civil
+    CD = "CD"  # Carné diplomático
     PA = "PA"  # Pasaporte
+    SC = "SC"  # Salvoconducto de permanencia
     PE = "PE"  # Permiso especial de permanencia
-    PPT = "PPT"  # Permiso por protección temporal
+    DE = "DE"  # Documento extranjero
+    PT = "PT"  # Permiso por protección temporal
     CN = "CN"  # Certificado de nacido vivo
-    AS = "AS"  # Adulto sin identificación
-    MS = "MS"  # Menor sin identificación
+    AS = "AS"  # Adulto sin identificar
+    MS = "MS"  # Menor sin identificar
 
 
 class Clinic(Base):

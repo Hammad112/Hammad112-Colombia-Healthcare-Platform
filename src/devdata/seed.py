@@ -80,7 +80,7 @@ DOCUMENT_TYPES: tuple[DocumentType, ...] = (
     DocumentType.CC,
     DocumentType.TI,
     DocumentType.CE,
-    DocumentType.PPT,
+    DocumentType.PT,
     DocumentType.RC,
 )
 DOCUMENT_TYPE_WEIGHTS: tuple[int, ...] = (70, 12, 8, 6, 4)
