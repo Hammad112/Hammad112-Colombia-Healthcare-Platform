@@ -77,13 +77,17 @@ The review API is read-only and enabled only when `APP_ENV` is `local` or `ci` a
 `ALLOW_REAL_PATIENT_DATA=false`. Otherwise a GET to any `/review` route responds 404,
 and `/docs` and `/openapi.json` are not served.
 
-It has no authentication. `python main.py` listens on 127.0.0.1 by default, and
-`docker-compose.yml` publishes the port on the host's loopback interface only. Do not
-expose it to a network.
+It has no authentication, so while it is enabled the server refuses to bind to anything but
+the loopback interface; `docker-compose.yml` publishes the port on the host's loopback
+interface only.
+
+Every route except `GET /review/clinics` requires a `clinic_id` query parameter and returns
+only that clinic's data, which PostgreSQL enforces through row-level security. Start at
+`GET /review/clinics` to find an id; omitting it is a 422.
 
 | Endpoint | Returns |
 |---|---|
-| `GET /review/summary` | Row counts per table and appointments per status |
+| `GET /review/summary` | Row counts and appointments per status, for one clinic (`clinic_id`) |
 | `GET /review/clinics` | Clinics |
 | `GET /review/locations` | Locations (`clinic_id`) |
 | `GET /review/appointment-types` | Appointment types (`clinic_id`) |
@@ -93,10 +97,10 @@ expose it to a network.
 | `GET /review/patients/{patient_id}` | A patient with consents, phone bindings and appointments |
 | `GET /review/appointments` | Appointments, paginated (`clinic_id`, `doctor_id`, `patient_id`, `status`, `date_from`, `date_to`) |
 | `GET /review/appointments/{appointment_id}` | One appointment; start and end in Bogotá time |
-| `GET /review/consents` | Consents, paginated (`patient_id`, `purpose`, `active_only`) |
+| `GET /review/consents` | Consents, paginated (`clinic_id`, `patient_id`, `purpose`, `active_only`) |
 | `GET /review/phone-bindings/shared` | Phone numbers shared by several patients, identified by an opaque reference |
 | `GET /review/audit-log` | Audit entries, newest first (`patient_id`, `action`, `resource`) |
-| `GET /review/audit-log/verify` | Recomputes the audit hash chain; `intact: false` means an entry was altered, or one before the newest was removed or inserted |
+| `GET /review/audit-log/verify` | Recomputes the keyed audit hash chain and compares it with the newest anchor; `first_broken_id` names an altered entry, `truncated_after_id` a removal of the newest entries |
 | `GET /healthz` | Process is running |
 | `GET /readyz` | Database reachable as the runtime role; reports the real-data gate |
 
@@ -156,16 +160,24 @@ tests/               unit/ and integration/
 
 ## Known limitations at M0
 
-- Clinics are not isolated from each other yet. Every table except `clinics` has `clinic_id`, but
-  queries take it only as an optional filter and row-level security is not enabled. Isolation
-  arrives with staff authentication.
-- The audit hash chain has no secret key and no external anchor, so removal of the newest entries,
-  truncation by the owner account, or a fully recomputed chain is not detected.
-- Rate limiting is kept in process memory, so each API worker enforces its own limit.
-- Checkpoint storage exists, but checkpoint encryption and expiry arrive with the conversation graph in M3.
-- The document type list is a working subset pending confirmation against the RIPS code table.
-- Staff authentication does not exist. The review API is the only data interface, is enabled only
-  in synthetic-data mode, and must not be exposed to a network.
+- Staff authentication does not exist. The review API is the only data interface and is enabled
+  only in synthetic-data mode; while it is enabled the server refuses to bind anywhere but the
+  loopback interface. A request names its clinic in a `clinic_id` query parameter, which
+  authentication will replace with the signed-in user's clinic.
+- Rate limiting uses the in-process backend, so each API worker enforces its own limit. The
+  `RateLimiter` protocol in `src/core/ratelimit.py` is where a shared Redis backend plugs in,
+  which is required before running more than one worker.
+- Patient data must not be stored in a conversation channel whose value is a bare string, number
+  or boolean: LangGraph writes those into the `checkpoints` row without consulting the encrypting
+  serializer. Structured values are encrypted.
+- The checkpoint retention sweep is run by hand (`python -m src.conversation.checkpointer`) until
+  background jobs arrive in M2.
+- The audit chain is keyed and anchored, but an anchor bounds the loss only up to the last anchor
+  taken; the API anchors on startup and shutdown, so entries written since then are not yet
+  witnessed. Scheduled anchoring arrives with M2.
+- The document type list follows MinSalud's Documento Técnico 1 under Resolución 948 de 2026.
+  That table now lives outside the resolution and can change without a new norm, so it needs
+  re-checking before real clinic files are imported in M1.
 
 ## License
 

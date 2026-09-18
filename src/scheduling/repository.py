@@ -1,7 +1,9 @@
 """Queries for appointment types, availability and appointments.
 
-Appointment results include the patient's name, so every function returning
-appointments records one audit entry per appointment returned.
+Every function takes the clinic explicitly; row-level security enforces the same
+boundary in the database. Appointment results include the patient's name, so
+every function returning appointments records one audit entry per appointment
+returned, and none of them returns appointments of a soft-deleted patient.
 """
 
 from __future__ import annotations
@@ -43,7 +45,9 @@ class AppointmentView:
 
 @dataclass(frozen=True, slots=True)
 class AppointmentFilter:
-    clinic_id: uuid.UUID | None = None
+    """Which appointments to return. The clinic is required; the rest narrow further."""
+
+    clinic_id: uuid.UUID
     doctor_id: uuid.UUID | None = None
     patient_id: uuid.UUID | None = None
     status: AppointmentStatus | None = None
@@ -51,7 +55,7 @@ class AppointmentFilter:
     starts_before: datetime | None = None  # exclusive
 
 
-def _appointment_view_statement() -> Select[Any]:
+def _appointment_view_statement(clinic_id: uuid.UUID) -> Select[Any]:
     return (
         select(
             Appointment,
@@ -66,7 +70,7 @@ def _appointment_view_statement() -> Select[Any]:
         .join(Location, Location.id == Appointment.location_id)
         .join(AppointmentType, AppointmentType.id == Appointment.appointment_type_id)
         .join(Patient, Patient.id == Appointment.patient_id)
-        .where(Patient.deleted_at.is_(None))
+        .where(Appointment.clinic_id == clinic_id, Patient.deleted_at.is_(None))
         .order_by(func.lower(Appointment.during), Appointment.id)
     )
 
@@ -100,36 +104,44 @@ async def _record_views(session: AsyncSession, views: list[AppointmentView]) -> 
 
 
 async def list_appointment_types(
-    session: AsyncSession, *, clinic_id: uuid.UUID | None
+    session: AsyncSession, *, clinic_id: uuid.UUID
 ) -> list[AppointmentType]:
-    statement = select(AppointmentType).order_by(AppointmentType.name)
-    if clinic_id is not None:
-        statement = statement.where(AppointmentType.clinic_id == clinic_id)
+    statement = (
+        select(AppointmentType)
+        .where(AppointmentType.clinic_id == clinic_id)
+        .order_by(AppointmentType.name)
+    )
     return list((await session.scalars(statement)).all())
 
 
 async def get_availability(
-    session: AsyncSession, doctor_id: uuid.UUID
+    session: AsyncSession, *, clinic_id: uuid.UUID, doctor_id: uuid.UUID
 ) -> tuple[list[AvailabilityRule], list[AvailabilityException]]:
     rules = await session.scalars(
         select(AvailabilityRule)
-        .where(AvailabilityRule.doctor_id == doctor_id)
+        .where(AvailabilityRule.clinic_id == clinic_id, AvailabilityRule.doctor_id == doctor_id)
         .order_by(AvailabilityRule.weekday, AvailabilityRule.start_time)
     )
     exceptions = await session.scalars(
         select(AvailabilityException)
-        .where(AvailabilityException.doctor_id == doctor_id)
+        .where(
+            AvailabilityException.clinic_id == clinic_id,
+            AvailabilityException.doctor_id == doctor_id,
+        )
         .order_by(AvailabilityException.on_date, AvailabilityException.start_time)
     )
     return list(rules.all()), list(exceptions.all())
 
 
-async def count_upcoming_active(session: AsyncSession, doctor_id: uuid.UUID) -> int:
+async def count_upcoming_active(
+    session: AsyncSession, *, clinic_id: uuid.UUID, doctor_id: uuid.UUID
+) -> int:
     """Active appointments or holds for the doctor that start now or later."""
     count = await session.scalar(
         select(func.count())
         .select_from(Appointment)
         .where(
+            Appointment.clinic_id == clinic_id,
             Appointment.doctor_id == doctor_id,
             Appointment.status.in_(ACTIVE_STATUSES),
             func.lower(Appointment.during) >= func.now(),
@@ -138,9 +150,11 @@ async def count_upcoming_active(session: AsyncSession, doctor_id: uuid.UUID) -> 
     return int(count or 0)
 
 
-async def count_by_status(session: AsyncSession) -> dict[str, int]:
+async def count_by_status(session: AsyncSession, *, clinic_id: uuid.UUID) -> dict[str, int]:
     rows = await session.execute(
-        select(Appointment.status, func.count()).group_by(Appointment.status)
+        select(Appointment.status, func.count())
+        .where(Appointment.clinic_id == clinic_id)
+        .group_by(Appointment.status)
     )
     return {str(status): int(count) for status, count in rows.tuples()}
 
@@ -149,9 +163,7 @@ async def list_appointments(
     session: AsyncSession, *, page: PageRequest, filters: AppointmentFilter
 ) -> PageResult[AppointmentView]:
     """Appointments ordered by start time, then id."""
-    statement = _appointment_view_statement()
-    if filters.clinic_id is not None:
-        statement = statement.where(Appointment.clinic_id == filters.clinic_id)
+    statement = _appointment_view_statement(filters.clinic_id)
     if filters.doctor_id is not None:
         statement = statement.where(Appointment.doctor_id == filters.doctor_id)
     if filters.patient_id is not None:
@@ -170,10 +182,12 @@ async def list_appointments(
 
 
 async def get_appointment(
-    session: AsyncSession, appointment_id: uuid.UUID
+    session: AsyncSession, *, clinic_id: uuid.UUID, appointment_id: uuid.UUID
 ) -> AppointmentView | None:
     row = (
-        await session.execute(_appointment_view_statement().where(Appointment.id == appointment_id))
+        await session.execute(
+            _appointment_view_statement(clinic_id).where(Appointment.id == appointment_id)
+        )
     ).first()
     if row is None:
         return None
@@ -191,10 +205,10 @@ async def get_appointment(
 
 
 async def list_patient_appointments(
-    session: AsyncSession, patient_id: uuid.UUID
+    session: AsyncSession, *, clinic_id: uuid.UUID, patient_id: uuid.UUID
 ) -> list[AppointmentView]:
     rows = await session.execute(
-        _appointment_view_statement().where(Appointment.patient_id == patient_id)
+        _appointment_view_statement(clinic_id).where(Appointment.patient_id == patient_id)
     )
     views = [_to_view(row) for row in rows.all()]
     await _record_views(session, views)

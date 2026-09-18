@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
+from unittest.mock import patch
 
 import psycopg
 import pytest
@@ -13,8 +15,14 @@ from sqlalchemy.pool import NullPool
 
 from src.audit.context import AccessAction, AuditContext
 from src.audit.models import AccessLogEntry
-from src.audit.service import Access, record_access, record_accesses, verify_chain
-from src.core.config import Settings
+from src.audit.service import (
+    Access,
+    anchor_chain,
+    record_access,
+    record_accesses,
+    verify_chain,
+)
+from src.core.config import Settings, get_settings
 
 
 async def _record(session: AsyncSession, count: int) -> None:
@@ -116,3 +124,66 @@ async def test_concurrent_writers_keep_one_unbroken_chain(
 
     result = await verify_chain(session)
     assert (result.rows_checked, result.intact) == (24, True)
+
+
+async def test_the_chain_is_keyed(session: AsyncSession, staff_context: AuditContext) -> None:
+    """Without AUDIT_CHAIN_KEY the hashes could be recomputed by anyone who can
+    write to the database. Verification under a different key fails."""
+    await _record(session, 3)
+    assert (await verify_chain(session)).intact
+
+    get_settings.cache_clear()
+    try:
+        with patch.dict(os.environ, {"AUDIT_CHAIN_KEY": "a-different-audit-chain-key-entirely"}):
+            get_settings.cache_clear()
+            assert (await verify_chain(session)).first_broken_id is not None
+    finally:
+        get_settings.cache_clear()
+    assert (await verify_chain(session)).intact
+
+
+async def test_an_anchor_records_the_tip(
+    session: AsyncSession, staff_context: AuditContext
+) -> None:
+    await _record(session, 3)
+    anchor = await anchor_chain(session)
+    await session.commit()
+
+    tip = (await session.scalars(select(AccessLogEntry).order_by(AccessLogEntry.id.desc()))).first()
+    assert tip is not None
+    assert (anchor.entry_id, anchor.row_hash, anchor.entry_count) == (tip.id, tip.row_hash, 3)
+
+
+async def test_truncating_the_newest_entries_is_detected(
+    session: AsyncSession, staff_context: AuditContext, owner_connection: psycopg.Connection
+) -> None:
+    """The chain alone cannot see this: what remains still verifies. The anchor can."""
+    await _record(session, 4)
+    anchor = await anchor_chain(session)
+    await session.commit()
+
+    # Only the owner can delete; the trigger rejects even that, so it is
+    # disabled first. This is the attack the anchor exists to make visible.
+    owner_connection.execute("ALTER TABLE audit.access_log DISABLE TRIGGER access_log_append_only")
+    owner_connection.execute("DELETE FROM audit.access_log WHERE id >= %s", (anchor.entry_id,))
+    owner_connection.execute("ALTER TABLE audit.access_log ENABLE TRIGGER access_log_append_only")
+
+    result = await verify_chain(session)
+    assert result.first_broken_id is None, "the surviving entries still form a valid chain"
+    assert result.truncated_after_id == anchor.entry_id
+    assert not result.intact
+
+
+async def test_an_anchor_cannot_be_changed_or_removed(
+    session: AsyncSession, staff_context: AuditContext, owner_connection: psycopg.Connection
+) -> None:
+    await _record(session, 1)
+    await anchor_chain(session)
+    await session.commit()
+
+    for statement in (
+        "UPDATE audit.chain_anchor SET entry_count = 0",
+        "DELETE FROM audit.chain_anchor",
+    ):
+        with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
+            owner_connection.execute(statement)

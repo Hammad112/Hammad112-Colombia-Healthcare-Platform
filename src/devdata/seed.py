@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import random
+import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
@@ -44,6 +45,7 @@ from src.audit.service import Access, record_accesses
 from src.core.config import get_settings
 from src.core.crypto import blind_index
 from src.core.db import configure_event_loop_policy, dispose_engine, get_sessionmaker
+from src.core.tenancy import ClinicScope, apply_clinic_scope
 from src.core.timezones import BOGOTA
 from src.identity.models import (
     BindingRelationship,
@@ -78,7 +80,7 @@ DOCUMENT_TYPES: tuple[DocumentType, ...] = (
     DocumentType.CC,
     DocumentType.TI,
     DocumentType.CE,
-    DocumentType.PPT,
+    DocumentType.PT,
     DocumentType.RC,
 )
 DOCUMENT_TYPE_WEIGHTS: tuple[int, ...] = (70, 12, 8, 6, 4)
@@ -89,6 +91,7 @@ SHARED_HANDSET_PATIENTS = 3
 
 @dataclass(frozen=True, slots=True)
 class SeedReport:
+    clinic_id: uuid.UUID
     doctors: int
     patients: int
     appointments: int
@@ -158,6 +161,11 @@ async def seed_synthetic_data(
     clinic = Clinic(name="Clínica Demo Bogotá")
     session.add(clinic)
     await session.flush()
+
+    # Every table below is under row-level security. Without a scope the clinic
+    # policies reject each insert, so the scope is bound before the first child
+    # row and lasts for the rest of this transaction.
+    await apply_clinic_scope(session, ClinicScope(clinic_id=clinic.id))
 
     location = Location(
         clinic_id=clinic.id, name="Sede Principal", address="Calle 100 # 15-20, Bogotá"
@@ -265,7 +273,10 @@ async def seed_synthetic_data(
         ],
     )
     return SeedReport(
-        doctors=len(doctor_rows), patients=len(patient_rows), appointments=len(appointments)
+        clinic_id=clinic.id,
+        doctors=len(doctor_rows),
+        patients=len(patient_rows),
+        appointments=len(appointments),
     )
 
 

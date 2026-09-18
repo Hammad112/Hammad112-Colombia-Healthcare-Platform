@@ -16,8 +16,13 @@ from src import bootstrap
 from src.audit.context import AuditContext
 from src.audit.models import AccessLogEntry
 from src.audit.service import verify_chain
-from src.conversation.checkpointer import CHECKPOINT_SCHEMA, open_checkpointer
+from src.conversation.checkpointer import (
+    CHECKPOINT_SCHEMA,
+    open_checkpointer,
+    sweep_expired_threads,
+)
 from src.core.config import Settings
+from src.core.tenancy import ClinicScope, apply_clinic_scope
 from src.core.timezones import BOGOTA
 from src.devdata.seed import (
     APPOINTMENTS_PER_DOCTOR,
@@ -36,6 +41,8 @@ async def test_seed_creates_expected_records_and_audits_them(
     await session.commit()
 
     assert report is not None
+    # The commit ended the transaction the seeder scoped; the reads below need it back.
+    await apply_clinic_scope(session, ClinicScope(clinic_id=report.clinic_id))
     assert (report.patients, report.doctors) == (20, 3)
     assert report.appointments == 3 * APPOINTMENTS_PER_DOCTOR
     assert len((await session.scalars(select(Patient))).all()) == 20
@@ -65,8 +72,10 @@ async def test_seeded_appointments_never_overlap(
 ) -> None:
     # The exclusion constraint would reject overlaps; this documents that the
     # seeder produces a valid schedule rather than relying on luck.
-    await seed_synthetic_data(session, patients=10, doctors=2)
+    report = await seed_synthetic_data(session, patients=10, doctors=2)
     await session.commit()
+    assert report is not None
+    await apply_clinic_scope(session, ClinicScope(clinic_id=report.clinic_id))
     rows = (await session.scalars(select(Appointment))).all()
     assert len(rows) == 2 * APPOINTMENTS_PER_DOCTOR
 
@@ -112,3 +121,98 @@ def test_ensure_runtime_role_is_idempotent_and_password_works(settings: Settings
     bootstrap.ensure_runtime_role(settings)
     with psycopg.connect(settings.conninfo(admin=False)) as conn:
         assert conn.execute("SELECT current_user").fetchone() == (settings.app_db_user,)
+
+
+async def _run_one_checkpoint(settings: Settings, thread_id: str, marker: object) -> None:
+    """Run a one-node graph that puts `marker` in the `note` channel.
+
+    A str lands inline in the `checkpoints` row; anything else goes through the
+    serializer into `checkpoint_blobs`.
+    """
+    graph = StateGraph(_Note)
+    graph.add_node("note", lambda state: {"note": marker})
+    graph.add_edge(START, "note")
+    graph.add_edge("note", END)
+    async with open_checkpointer(settings) as checkpointer:
+        await graph.compile(checkpointer=checkpointer).ainvoke(
+            {"note": ""}, {"configurable": {"thread_id": thread_id}}
+        )
+
+
+class _Note(TypedDict):
+    note: object
+
+
+async def test_checkpoint_blobs_are_stored_encrypted(settings: Settings) -> None:
+    """Values the checkpointer puts in `checkpoint_blobs` are ciphertext.
+
+    This is where message objects go, which is where conversation content will
+    live. `test_inlined_primitive_channel_values_are_not_encrypted` covers what
+    this does not reach.
+    """
+    marker = "Ana Gómez Ruiz cita 9 de la mañana"
+    await _run_one_checkpoint(settings, "encryption-test-thread", [marker])
+
+    with psycopg.connect(settings.conninfo(admin=True)) as conn:
+        blobs = conn.execute(
+            f"SELECT blob FROM {CHECKPOINT_SCHEMA}.checkpoint_blobs WHERE blob IS NOT NULL"  # noqa: S608
+        ).fetchall()
+
+    assert blobs, "no blob values were written, so this check would prove nothing"
+    stored = b"".join(bytes(row[0]) for row in blobs)
+    assert marker.encode("utf-8") not in stored
+    assert all(bytes(row[0])[0] == 1 for row in blobs), "not our ciphertext key version"
+
+
+async def test_inlined_primitive_channel_values_are_not_encrypted(settings: Settings) -> None:
+    """A deliberate record of a LangGraph behaviour the serializer cannot reach.
+
+    `AsyncPostgresSaver.aput` writes channel values that are None, str, int,
+    float or bool straight into the `checkpoints` JSONB column, and only routes
+    the rest through the serializer. An encrypting serializer therefore does not
+    protect them.
+
+    The graph that would write patient data is M3. Until it exists this test
+    pins the behaviour, so a channel holding a patient's name as a bare string
+    cannot be added without this failing first. If a LangGraph release starts
+    routing primitives through the serializer too, this also fails, and the
+    restriction can be lifted.
+    """
+    marker = "Ana Gómez Ruiz"
+    await _run_one_checkpoint(settings, "inlining-test-thread", marker)
+
+    with psycopg.connect(settings.conninfo(admin=True)) as conn:
+        rows = conn.execute(
+            f"SELECT checkpoint FROM {CHECKPOINT_SCHEMA}.checkpoints"  # noqa: S608
+            " WHERE thread_id = 'inlining-test-thread'"
+        ).fetchall()
+
+    inlined = [row[0]["channel_values"].get("note") for row in rows]
+    assert marker in inlined, (
+        "LangGraph no longer inlines primitive channel values; checkpoint state "
+        "may now be encrypted end to end, so lift the restriction in CLAUDE.md"
+    )
+
+
+async def test_the_sweep_deletes_only_idle_threads(settings: Settings) -> None:
+    await _run_one_checkpoint(settings, "fresh-thread", "reciente")
+    await _run_one_checkpoint(settings, "stale-thread", "antiguo")
+
+    older_than_retention = settings.checkpoint_retention_days + 1
+    with psycopg.connect(settings.conninfo(admin=True), autocommit=True) as conn:
+        for table in ("checkpoints", "checkpoint_blobs", "checkpoint_writes"):
+            conn.execute(
+                f"UPDATE {CHECKPOINT_SCHEMA}.{table}"  # noqa: S608
+                f" SET created_at = now() - make_interval(days => %s)"
+                " WHERE thread_id = 'stale-thread'",
+                (older_than_retention,),
+            )
+
+    assert await sweep_expired_threads(settings) == 1
+
+    with psycopg.connect(settings.conninfo(admin=True)) as conn:
+        remaining = conn.execute(
+            f"SELECT DISTINCT thread_id FROM {CHECKPOINT_SCHEMA}.checkpoints"  # noqa: S608
+        ).fetchall()
+    assert ("stale-thread",) not in remaining
+    assert ("fresh-thread",) in remaining

@@ -38,6 +38,7 @@ _TABLES = (
     "app.locations",
     "app.clinics",
     "audit.access_log",
+    "audit.chain_anchor",
 )
 
 

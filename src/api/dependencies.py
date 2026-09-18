@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Annotated
 
-from fastapi import Depends, Query
+from fastapi import Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import Settings, get_settings
 from src.core.db import get_session
 from src.core.pagination import PageRequest
+from src.core.tenancy import ClinicScope, apply_clinic_scope
 
 MAX_PAGE_SIZE = 200
 
@@ -27,3 +29,31 @@ def page_request(
 SessionDep = Annotated[AsyncSession, Depends(get_session, scope="function")]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 PageDep = Annotated[PageRequest, Depends(page_request)]
+
+
+async def clinic_scope(
+    session: SessionDep,
+    clinic_id: Annotated[uuid.UUID, Query(description="Clinic whose data this request may access")],
+) -> ClinicScope:
+    """Require a clinic and bind it to this request's transaction.
+
+    Every route serving clinic data depends on this, so the database's row-level
+    security has a clinic to compare against. Without it the policies match no
+    row, which is the safe default but would look like an empty database.
+
+    A clinic id that does not exist is not rejected here: the row-level policies
+    simply match nothing, and the route returns an empty result or 404.
+    """
+    scope = ClinicScope(clinic_id=clinic_id)
+    await apply_clinic_scope(session, scope)
+    return scope
+
+
+ClinicScopeDep = Annotated[ClinicScope, Depends(clinic_scope)]
+
+
+def require_found[T](value: T | None, what: str) -> T:
+    """Return the value, or raise 404. Also covers rows hidden by clinic scope."""
+    if value is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"{what} not found")
+    return value

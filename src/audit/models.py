@@ -1,11 +1,11 @@
 """Append-only access log (ADR-09, ADR-24).
 
-The table lives in the `audit` schema. For the runtime role it is append-only:
-the initial migration grants that role only SELECT and INSERT. The migration
-also adds a trigger that rejects UPDATE and DELETE from any role. The owner
-account can still TRUNCATE the table or disable the trigger. The hash chain in
-src/audit/service.py detects altered entries and gaps before the newest entry,
-but not truncation or removal of the newest entries.
+The tables live in the `audit` schema. For the runtime role both are
+append-only: the migrations grant that role only SELECT and INSERT, and a
+trigger rejects UPDATE and DELETE from any role. The owner account can still
+TRUNCATE a table or disable a trigger, which is why `chain_anchor` exists: the
+keyed chain in src/audit/service.py detects altered entries and gaps, and the
+anchors detect the truncation the chain alone cannot see.
 
 `processor`, `processor_model`, `fields_disclosed` and `zero_retention` describe
 disclosures to third-party processors such as model or speech providers. Prompt
@@ -63,3 +63,29 @@ class AccessLogEntry(Base):
 
     prev_hash: Mapped[bytes | None] = mapped_column(LargeBinary)
     row_hash: Mapped[bytes] = mapped_column(LargeBinary)
+
+
+class ChainAnchor(Base):
+    """A witness to the state of the access log at one point in time.
+
+    An anchor records the id and hash of the newest access-log entry when it was
+    taken. The chain alone cannot detect removal of its newest entries, because
+    what remains is still internally consistent. An anchor makes that removal
+    visible: the entry it names is either missing or no longer carries the hash
+    the anchor recorded.
+
+    Anchors are also written to the application log, so a shipped copy survives
+    outside the database. An attacker who can truncate both tables still cannot
+    reach that copy.
+    """
+
+    __tablename__ = "chain_anchor"
+    __table_args__ = ({"schema": "audit"},)
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    anchored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Null when the log was empty: an anchor over nothing still proves the log
+    # held nothing at that moment.
+    entry_id: Mapped[int | None] = mapped_column(BigInteger)
+    row_hash: Mapped[bytes | None] = mapped_column(LargeBinary)
+    entry_count: Mapped[int] = mapped_column(BigInteger)

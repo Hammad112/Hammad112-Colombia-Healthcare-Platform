@@ -1,4 +1,7 @@
-"""Review routes for patients and appointments. Every read is audited by the repositories."""
+"""Review routes for patients and appointments.
+
+Every read is clinic-scoped and audited by the repositories.
+"""
 
 from __future__ import annotations
 
@@ -6,9 +9,9 @@ import uuid
 from datetime import date, datetime, time, timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Query
 
-from src.api.dependencies import PageDep, SessionDep
+from src.api.dependencies import ClinicScopeDep, PageDep, SessionDep, require_found
 from src.api.review.schemas import (
     AppointmentOut,
     ConsentOut,
@@ -34,34 +37,47 @@ def _today() -> date:
 @router.get("/patients", response_model=Page[PatientOut])
 async def list_patients(
     session: SessionDep,
+    scope: ClinicScopeDep,
     page: PageDep,
-    clinic_id: uuid.UUID | None = None,
     phone: Annotated[
         str | None, Query(description="Exact E.164 number, for example +573001112233")
     ] = None,
     document_number: Annotated[str | None, Query(description="Exact document number")] = None,
 ) -> Page[PatientOut]:
-    """Active patients, oldest first.
+    """Active patients of the clinic, oldest first.
 
     Names and identifiers are encrypted at rest, so there is no name search.
     `phone` and `document_number` match exactly through the blind indexes.
     """
     result = await registry.list_patients(
-        session, page=page, clinic_id=clinic_id, phone_e164=phone, document_number=document_number
+        session,
+        clinic_id=scope.clinic_id,
+        page=page,
+        phone_e164=phone,
+        document_number=document_number,
     )
     today = _today()
     return to_page(result, [PatientOut.build(p, today=today) for p in result.items])
 
 
 @router.get("/patients/{patient_id}", response_model=PatientDetail)
-async def get_patient(session: SessionDep, patient_id: uuid.UUID) -> PatientDetail:
+async def get_patient(
+    session: SessionDep, scope: ClinicScopeDep, patient_id: uuid.UUID
+) -> PatientDetail:
     """One patient with their consents, phone bindings and appointments."""
-    patient = await registry.get_patient(session, patient_id)
-    if patient is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Patient not found")
-    consents = await identity.list_patient_consents(session, patient_id)
-    bindings = await identity.list_patient_bindings(session, patient_id)
-    appointments = await scheduling.list_patient_appointments(session, patient_id)
+    patient = require_found(
+        await registry.get_patient(session, clinic_id=scope.clinic_id, patient_id=patient_id),
+        "Patient",
+    )
+    consents = await identity.list_patient_consents(
+        session, clinic_id=scope.clinic_id, patient_id=patient_id
+    )
+    bindings = await identity.list_patient_bindings(
+        session, clinic_id=scope.clinic_id, patient_id=patient_id
+    )
+    appointments = await scheduling.list_patient_appointments(
+        session, clinic_id=scope.clinic_id, patient_id=patient_id
+    )
     return PatientDetail(
         **PatientOut.build(patient, today=_today()).model_dump(),
         consents=[ConsentOut.build(consent) for consent in consents],
@@ -73,8 +89,8 @@ async def get_patient(session: SessionDep, patient_id: uuid.UUID) -> PatientDeta
 @router.get("/appointments", response_model=Page[AppointmentOut])
 async def list_appointments(
     session: SessionDep,
+    scope: ClinicScopeDep,
     page: PageDep,
-    clinic_id: uuid.UUID | None = None,
     doctor_id: uuid.UUID | None = None,
     patient_id: uuid.UUID | None = None,
     status_filter: Annotated[AppointmentStatus | None, Query(alias="status")] = None,
@@ -87,7 +103,7 @@ async def list_appointments(
 ) -> Page[AppointmentOut]:
     """Appointments ordered by start time. Date filters apply to the start time."""
     filters = scheduling.AppointmentFilter(
-        clinic_id=clinic_id,
+        clinic_id=scope.clinic_id,
         doctor_id=doctor_id,
         patient_id=patient_id,
         status=status_filter,
@@ -103,8 +119,13 @@ async def list_appointments(
 
 
 @router.get("/appointments/{appointment_id}", response_model=AppointmentOut)
-async def get_appointment(session: SessionDep, appointment_id: uuid.UUID) -> AppointmentOut:
-    view = await scheduling.get_appointment(session, appointment_id)
-    if view is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Appointment not found")
+async def get_appointment(
+    session: SessionDep, scope: ClinicScopeDep, appointment_id: uuid.UUID
+) -> AppointmentOut:
+    view = require_found(
+        await scheduling.get_appointment(
+            session, clinic_id=scope.clinic_id, appointment_id=appointment_id
+        ),
+        "Appointment",
+    )
     return AppointmentOut.build(view)

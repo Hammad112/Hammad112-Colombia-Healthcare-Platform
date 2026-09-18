@@ -11,11 +11,8 @@ unhandled-error boundary, body size limit, rate limit.
 
 from __future__ import annotations
 
-import math
 import re
-import time
 import uuid
-from collections import deque
 from typing import ClassVar
 
 import structlog
@@ -25,6 +22,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from src.audit.context import ActorKind, AuditContext, reset_context, set_context
 from src.core.logging import get_logger
+from src.core.ratelimit import RateLimiter
 
 _log = get_logger(__name__)
 _REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
@@ -219,50 +217,35 @@ class BodySizeLimitMiddleware:
 
 
 class RateLimitMiddleware:
-    """Limit each client IP to `requests_per_minute` over a sliding 60-second window.
+    """Limit each client IP through a `RateLimiter` backend.
 
-    Rejected requests receive 429 with `Retry-After` set to the whole seconds
-    until the client's oldest counted request leaves the window. Paths in
-    `exempt_paths` are never limited, so health probes keep working.
+    Rejected requests receive 429 with `Retry-After` set to the whole seconds the
+    backend says to wait. Paths in `exempt_paths` are never limited, so health
+    probes keep working.
 
     The client address is the ASGI scope's `client`. Behind a reverse proxy,
     start the server with proxy headers enabled and the proxy's address trusted,
     otherwise every request appears to come from the proxy.
     """
 
-    # ponytail: counters live in this process, so N workers allow up to N x the
-    # limit per client. Move the window to Redis before running multiple
-    # workers (planned for M4).
-
-    _WINDOW_SECONDS = 60.0
-
     def __init__(
         self,
         app: ASGIApp,
-        requests_per_minute: int,
+        limiter: RateLimiter,
         exempt_paths: frozenset[str] = frozenset({"/healthz", "/readyz"}),
     ) -> None:
         self.app = app
-        self.limit = requests_per_minute
+        self.limiter = limiter
         self.exempt_paths = exempt_paths
-        self._hits: dict[str, deque[float]] = {}
-        self._last_sweep = time.monotonic()
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or scope["path"] in self.exempt_paths:
             await self.app(scope, receive, send)
             return
 
-        now = time.monotonic()
-        self._sweep_idle_clients(now)
         client = scope.get("client")
-        key = client[0] if client else "unknown"
-        hits = self._hits.setdefault(key, deque())
-        while hits and now - hits[0] >= self._WINDOW_SECONDS:
-            hits.popleft()
-
-        if len(hits) >= self.limit:
-            retry_after = max(1, math.ceil(self._WINDOW_SECONDS - (now - hits[0])))
+        retry_after = await self.limiter.check(client[0] if client else "unknown")
+        if retry_after is not None:
             response = JSONResponse(
                 {"detail": "Too many requests"},
                 status_code=429,
@@ -271,17 +254,4 @@ class RateLimitMiddleware:
             await response(scope, receive, send)
             return
 
-        hits.append(now)
         await self.app(scope, receive, send)
-
-    def _sweep_idle_clients(self, now: float) -> None:
-        """Drop clients with no requests in the window, at most once per window."""
-        if now - self._last_sweep < self._WINDOW_SECONDS:
-            return
-        self._last_sweep = now
-        for key in [
-            k
-            for k, hits in self._hits.items()
-            if not hits or now - hits[-1] >= self._WINDOW_SECONDS
-        ]:
-            del self._hits[key]

@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 
 from src.core.config import Settings
+from src.core.tenancy import ClinicScope, apply_clinic_scope
 from src.scheduling.models import AppointmentStatus, AvailabilityRule
 from tests.integration.factories import appointment, at, create_graph
 
@@ -107,6 +108,7 @@ async def test_concurrent_bookings_of_one_slot_admit_exactly_one(
     async def attempt(offset_minutes: int) -> str | None:
         """Return None on success, or the SQLSTATE of a lost race."""
         async with maker() as racer:
+            await apply_clinic_scope(racer, ClinicScope(clinic_id=graph.clinic_id))
             racer.add(appointment(graph, start + timedelta(minutes=offset_minutes)))
             try:
                 await racer.commit()
