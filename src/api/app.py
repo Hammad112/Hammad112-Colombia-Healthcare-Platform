@@ -21,6 +21,7 @@ from src.audit.service import anchor_chain
 from src.core.config import get_settings
 from src.core.db import dispose_engine, get_sessionmaker
 from src.core.logging import configure_logging, get_logger
+from src.core.ratelimit import InProcessRateLimiter
 
 MAX_REQUEST_BODY_BYTES = 1_000_000
 
@@ -74,7 +75,9 @@ def create_app() -> FastAPI:
     )
 
     # add_middleware wraps previously added middleware, so the last added runs first.
-    app.add_middleware(RateLimitMiddleware, requests_per_minute=settings.rate_limit_per_minute)
+    app.add_middleware(
+        RateLimitMiddleware, limiter=InProcessRateLimiter(settings.rate_limit_per_minute)
+    )
     app.add_middleware(BodySizeLimitMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
     app.add_middleware(UnhandledErrorMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import deque
 from collections.abc import Iterator
 
 import pytest
@@ -14,6 +13,7 @@ from src.api.middleware import (
     SecurityHeadersMiddleware,
 )
 from src.audit.context import get_context
+from src.core.ratelimit import InProcessRateLimiter
 
 
 def _app(*, rate_limit: int = 1000, max_bytes: int = 1000) -> FastAPI:
@@ -32,7 +32,7 @@ def _app(*, rate_limit: int = 1000, max_bytes: int = 1000) -> FastAPI:
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
-    app.add_middleware(RateLimitMiddleware, requests_per_minute=rate_limit)
+    app.add_middleware(RateLimitMiddleware, limiter=InProcessRateLimiter(rate_limit))
     app.add_middleware(BodySizeLimitMiddleware, max_bytes=max_bytes)
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(RequestContextMiddleware)
@@ -109,13 +109,15 @@ def test_health_probe_is_never_rate_limited() -> None:
         assert [limited.get("/healthz").status_code for _ in range(5)] == [200] * 5
 
 
-def test_idle_clients_are_swept(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_idle_keys_are_swept(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without the sweep the window would keep an entry per client seen, forever."""
     clock = [1000.0]
-    monkeypatch.setattr("src.api.middleware.time.monotonic", lambda: clock[0])
-    middleware = RateLimitMiddleware(_app(), requests_per_minute=10)
-    middleware._hits["198.51.100.7"] = deque([clock[0]])
+    monkeypatch.setattr("src.core.ratelimit.time.monotonic", lambda: clock[0])
+    limiter = InProcessRateLimiter(limit=10)
+    await limiter.check("198.51.100.7")
+    assert "198.51.100.7" in limiter._hits
 
     clock[0] += 61
-    middleware._sweep_idle_clients(clock[0])
+    await limiter.check("203.0.113.1")
 
-    assert "198.51.100.7" not in middleware._hits
+    assert "198.51.100.7" not in limiter._hits
