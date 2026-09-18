@@ -35,11 +35,14 @@ async def list_audit_log(
 
 @router.get("/audit-log/verify", response_model=ChainVerificationOut)
 async def verify_audit_log(session: SessionDep) -> ChainVerificationOut:
-    """Recompute the hash chain.
+    """Recompute the keyed hash chain and compare it with the newest anchor.
 
-    `intact: false` means an entry was altered, or an entry before the newest was
-    removed or inserted. `intact: true` does not rule out removal of the newest
-    entries or a fully recomputed chain; see src/audit/service.py.
+    `first_broken_id` names the first entry that was altered, or before which an
+    entry was removed or inserted. `truncated_after_id` names the entry the
+    newest anchor witnessed when the log no longer matches it, which is how
+    removal of the newest entries is caught. `intact` is true only when neither
+    is set, and entries written since the last anchor are not yet covered; see
+    src/audit/service.py.
     """
     verification = await audit.verify_chain(session)
     await audit.record_access(

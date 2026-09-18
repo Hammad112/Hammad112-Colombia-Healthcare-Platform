@@ -333,6 +333,7 @@ class ChainVerificationOut(BaseModel):
     rows_checked: int
     intact: bool
     first_broken_id: int | None
+    truncated_after_id: int | None
 
     @classmethod
     def build(cls, verification: ChainVerification) -> ChainVerificationOut:
@@ -340,6 +341,7 @@ class ChainVerificationOut(BaseModel):
             rows_checked=verification.rows_checked,
             intact=verification.intact,
             first_broken_id=verification.first_broken_id,
+            truncated_after_id=verification.truncated_after_id,
         )
 
 

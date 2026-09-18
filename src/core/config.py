@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     phi_encryption_key: SecretStr = SecretStr("")
     phi_blind_index_key: SecretStr = SecretStr("")
 
+    # Keys the audit chain. Whoever holds it can forge a chain, so in staging and
+    # production it belongs to a different secret store than the database
+    # password: an attacker with database write access must not also hold it.
+    audit_chain_key: SecretStr = SecretStr("")
+
     # ADR-11 / ADR-15 gate. While false, only synthetic data may be processed.
     allow_real_patient_data: bool = False
 
@@ -110,7 +115,7 @@ class Settings(BaseSettings):
         """Refuse to start staging or production on missing or placeholder secrets."""
         if self.app_env not in ("staging", "production"):
             return self
-        for name in ("phi_encryption_key", "phi_blind_index_key"):
+        for name in ("phi_encryption_key", "phi_blind_index_key", "audit_chain_key"):
             value = getattr(self, name).get_secret_value()
             if len(value) < _MIN_KEY_LENGTH or value.startswith(_PLACEHOLDER_PREFIXES):
                 raise ValueError(

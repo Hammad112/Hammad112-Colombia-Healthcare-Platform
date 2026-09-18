@@ -28,6 +28,7 @@ def test_review_routes_respond_404_outside_synthetic_mode(overrides: dict[str, o
         _env_file=None,
         phi_encryption_key=STRONG,
         phi_blind_index_key=STRONG,
+        audit_chain_key=STRONG,
         postgres_password="owner-secret",
         app_db_password="runtime-secret",
         **overrides,  # type: ignore[arg-type]
@@ -45,6 +46,7 @@ def test_reset_database_is_refused_outside_synthetic_mode() -> None:
         app_env="production",
         phi_encryption_key=STRONG,
         phi_blind_index_key=STRONG,
+        audit_chain_key=STRONG,
         postgres_password="owner-secret",
         app_db_password="runtime-secret",
     )

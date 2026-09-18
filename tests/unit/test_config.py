@@ -13,6 +13,7 @@ def _production(**overrides: object) -> Settings:
         "app_env": "production",
         "phi_encryption_key": STRONG_KEY,
         "phi_blind_index_key": STRONG_KEY + "x",
+        "audit_chain_key": STRONG_KEY + "y",
         "postgres_password": "owner-secret",
         "app_db_password": "runtime-secret",
     }
@@ -30,6 +31,8 @@ def test_production_accepts_strong_secrets() -> None:
         {"phi_encryption_key": "short"},
         {"phi_blind_index_key": "local-dev-bidx-not-for-production-00000000"},
         {"phi_encryption_key": "placeholder-test-phi-encryption-value"},
+        {"audit_chain_key": ""},
+        {"audit_chain_key": "change-me-locally-audit-chain-key-value"},
         {"postgres_password": ""},
         {"app_db_password": "change-me-locally-app"},
     ],
@@ -60,6 +63,7 @@ def test_synthetic_data_mode(app_env: str, allow_real: bool, expected: bool) -> 
         allow_real_patient_data=allow_real,
         phi_encryption_key=STRONG_KEY,
         phi_blind_index_key=STRONG_KEY,
+        audit_chain_key=STRONG_KEY,
         postgres_password="owner-secret",
         app_db_password="runtime-secret",
     )

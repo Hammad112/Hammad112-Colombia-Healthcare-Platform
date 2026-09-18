@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from sqlalchemy.exc import SQLAlchemyError
 
 from src.api import health
 from src.api.middleware import (
@@ -16,8 +17,9 @@ from src.api.middleware import (
     UnhandledErrorMiddleware,
 )
 from src.api.review import router as review_router
+from src.audit.service import anchor_chain
 from src.core.config import get_settings
-from src.core.db import dispose_engine
+from src.core.db import dispose_engine, get_sessionmaker
 from src.core.logging import configure_logging, get_logger
 
 MAX_REQUEST_BODY_BYTES = 1_000_000
@@ -33,8 +35,26 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         app_env=settings.app_env,
         allow_real_patient_data=settings.allow_real_patient_data,
     )
+    await _anchor_audit_chain()
     yield
+    await _anchor_audit_chain()
     await dispose_engine()
+
+
+async def _anchor_audit_chain() -> None:
+    """Witness the audit chain's tip, so entries written since the last anchor
+    cannot be removed unnoticed (see src/audit/service.py).
+
+    Anchoring once per process lifetime bounds the exposure to one process's
+    worth of entries. The scheduled anchoring that shortens that window arrives
+    with background jobs in M2. A failure here must not stop the API from
+    serving, so it is logged rather than raised.
+    """
+    try:
+        async with get_sessionmaker()() as session, session.begin():
+            await anchor_chain(session)
+    except SQLAlchemyError:
+        log.exception("audit.anchor_failed")
 
 
 def create_app() -> FastAPI:
