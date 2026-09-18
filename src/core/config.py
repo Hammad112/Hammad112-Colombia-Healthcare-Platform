@@ -70,6 +70,11 @@ class Settings(BaseSettings):
 
     rate_limit_per_minute: int = Field(default=60, ge=1)
 
+    # How long a conversation's checkpoints are kept. They hold patient data, so
+    # the retention sweep deletes them once a conversation has been idle this
+    # long (see src/conversation/checkpointer.py).
+    checkpoint_retention_days: int = Field(default=30, ge=1)
+
     @property
     def synthetic_data_mode(self) -> bool:
         """True where synthetic seeding and the review API are permitted."""

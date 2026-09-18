@@ -52,18 +52,27 @@ def _blind_index_key() -> bytes:
     return _derive_key(secret, b"phi-blind-index-v1")
 
 
-def encrypt(plaintext: str) -> bytes:
+def encrypt_bytes(plaintext: bytes) -> bytes:
+    """Encrypt arbitrary bytes in the format described above."""
     nonce = os.urandom(_NONCE_BYTES)
-    ciphertext = AESGCM(_encryption_key()).encrypt(nonce, plaintext.encode("utf-8"), None)
+    ciphertext = AESGCM(_encryption_key()).encrypt(nonce, plaintext, None)
     return bytes([_KEY_VERSION]) + nonce + ciphertext
 
 
-def decrypt(blob: bytes) -> str:
+def decrypt_bytes(blob: bytes) -> bytes:
     if not blob or blob[0] != _KEY_VERSION:
         raise ValueError("Unsupported ciphertext version")
     nonce = blob[1 : 1 + _NONCE_BYTES]
     ciphertext = blob[1 + _NONCE_BYTES :]
-    return AESGCM(_encryption_key()).decrypt(nonce, ciphertext, None).decode("utf-8")
+    return AESGCM(_encryption_key()).decrypt(nonce, ciphertext, None)
+
+
+def encrypt(plaintext: str) -> bytes:
+    return encrypt_bytes(plaintext.encode("utf-8"))
+
+
+def decrypt(blob: bytes) -> str:
+    return decrypt_bytes(blob).decode("utf-8")
 
 
 def normalize_for_index(value: str) -> str:
