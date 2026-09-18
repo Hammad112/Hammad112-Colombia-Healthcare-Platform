@@ -44,6 +44,7 @@ def to_page[S, T](result: PageResult[S], items: list[T]) -> Page[T]:
 
 
 class Summary(BaseModel):
+    clinic_id: uuid.UUID
     app_env: str
     real_patient_data_allowed: bool
     row_counts: dict[str, int]

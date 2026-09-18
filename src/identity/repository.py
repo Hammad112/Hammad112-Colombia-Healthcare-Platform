@@ -1,7 +1,9 @@
 """Queries for consents and phone bindings.
 
-Consents and bindings are patient data, so every function records one audit
-entry per record returned.
+Every function takes the clinic explicitly; row-level security enforces the same
+boundary in the database. Consents and bindings are patient data, so every
+function records one audit entry per record returned, and none of them returns
+records belonging to a soft-deleted patient.
 """
 
 from __future__ import annotations
@@ -53,6 +55,7 @@ async def _record_consents(session: AsyncSession, consents: list[Consent]) -> No
 async def list_consents(
     session: AsyncSession,
     *,
+    clinic_id: uuid.UUID,
     page: PageRequest,
     patient_id: uuid.UUID | None = None,
     purpose: ConsentPurpose | None = None,
@@ -61,7 +64,7 @@ async def list_consents(
     statement = (
         select(Consent)
         .join(Patient, Patient.id == Consent.patient_id)
-        .where(Patient.deleted_at.is_(None))
+        .where(Consent.clinic_id == clinic_id, Patient.deleted_at.is_(None))
         .order_by(Consent.granted_at, Consent.id)
     )
     if patient_id is not None:
@@ -76,11 +79,17 @@ async def list_consents(
     return PageResult(items=consents, total=total, limit=page.limit, offset=page.offset)
 
 
-async def list_patient_consents(session: AsyncSession, patient_id: uuid.UUID) -> list[Consent]:
+async def list_patient_consents(
+    session: AsyncSession, *, clinic_id: uuid.UUID, patient_id: uuid.UUID
+) -> list[Consent]:
     result = await session.scalars(
         select(Consent)
         .join(Patient, Patient.id == Consent.patient_id)
-        .where(Consent.patient_id == patient_id, Patient.deleted_at.is_(None))
+        .where(
+            Consent.clinic_id == clinic_id,
+            Consent.patient_id == patient_id,
+            Patient.deleted_at.is_(None),
+        )
         .order_by(Consent.granted_at)
     )
     consents = list(result.all())
@@ -88,11 +97,17 @@ async def list_patient_consents(session: AsyncSession, patient_id: uuid.UUID) ->
     return consents
 
 
-async def list_patient_bindings(session: AsyncSession, patient_id: uuid.UUID) -> list[PhoneBinding]:
+async def list_patient_bindings(
+    session: AsyncSession, *, clinic_id: uuid.UUID, patient_id: uuid.UUID
+) -> list[PhoneBinding]:
     result = await session.scalars(
         select(PhoneBinding)
         .join(Patient, Patient.id == PhoneBinding.patient_id)
-        .where(PhoneBinding.patient_id == patient_id, Patient.deleted_at.is_(None))
+        .where(
+            PhoneBinding.clinic_id == clinic_id,
+            PhoneBinding.patient_id == patient_id,
+            Patient.deleted_at.is_(None),
+        )
         .order_by(PhoneBinding.created_at)
     )
     bindings = list(result.all())
@@ -107,12 +122,18 @@ async def list_patient_bindings(session: AsyncSession, patient_id: uuid.UUID) ->
     return bindings
 
 
-async def list_shared_handsets(session: AsyncSession) -> list[SharedHandset]:
-    """Numbers with more than one unrevoked binding to an active patient, with those patients."""
+async def list_shared_handsets(
+    session: AsyncSession, *, clinic_id: uuid.UUID
+) -> list[SharedHandset]:
+    """Numbers with more than one unrevoked binding to an active patient of the clinic."""
     shared_numbers = (
         select(PhoneBinding.phone_e164_bidx)
         .join(Patient, Patient.id == PhoneBinding.patient_id)
-        .where(PhoneBinding.revoked_at.is_(None), Patient.deleted_at.is_(None))
+        .where(
+            PhoneBinding.clinic_id == clinic_id,
+            PhoneBinding.revoked_at.is_(None),
+            Patient.deleted_at.is_(None),
+        )
         .group_by(PhoneBinding.phone_e164_bidx)
         .having(func.count() > 1)
     )
@@ -120,6 +141,7 @@ async def list_shared_handsets(session: AsyncSession) -> list[SharedHandset]:
         select(PhoneBinding, Patient.given_names, Patient.family_names)
         .join(Patient, Patient.id == PhoneBinding.patient_id)
         .where(
+            PhoneBinding.clinic_id == clinic_id,
             PhoneBinding.revoked_at.is_(None),
             Patient.deleted_at.is_(None),
             PhoneBinding.phone_e164_bidx.in_(shared_numbers),

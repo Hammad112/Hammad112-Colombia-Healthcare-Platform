@@ -6,10 +6,12 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from fastapi.testclient import TestClient
 from sqlalchemy.dialects.postgresql import Range
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.crypto import blind_index
+from src.core.tenancy import ClinicScope, apply_clinic_scope
 from src.core.timezones import BOGOTA
 from src.identity.models import (
     BindingRelationship,
@@ -35,11 +37,16 @@ class Graph:
     patient_id: uuid.UUID
 
 
-async def create_graph(session: AsyncSession) -> Graph:
-    """A clinic with one location, doctor, appointment type and patient. Flushed, not committed."""
-    clinic = Clinic(name="Clínica Prueba")
+async def create_graph(session: AsyncSession, *, name: str = "Clínica Prueba") -> Graph:
+    """A clinic with one location, doctor, appointment type and patient. Flushed, not committed.
+
+    The clinic scope is left bound to the session's transaction, because row-level
+    security rejects every child insert without it.
+    """
+    clinic = Clinic(name=name)
     session.add(clinic)
     await session.flush()
+    await apply_clinic_scope(session, ClinicScope(clinic_id=clinic.id))
     location = Location(clinic_id=clinic.id, name="Sede", address="Calle 1 # 2-3")
     doctor = Doctor(clinic_id=clinic.id, full_name="Dra. Prueba", specialty="Medicina General")
     appointment_type = AppointmentType(clinic_id=clinic.id, name="Consulta", duration_minutes=20)
@@ -84,6 +91,12 @@ def appointment(
         status=status,
         expires_at=expires_at,
     )
+
+
+def scope_client(client: TestClient, graph: Graph) -> TestClient:
+    """Send `clinic_id` on every subsequent request. Scoped routes require it."""
+    client.params = {"clinic_id": str(graph.clinic_id)}
+    return client
 
 
 def at(day: int, hour: int, minute: int = 0) -> datetime:
@@ -134,4 +147,7 @@ async def add_patient_records(session: AsyncSession, graph: Graph) -> uuid.UUID:
         ]
     )
     await session.commit()
+    # The commit ended the transaction that held the scope; rebind it so the
+    # caller can keep querying this clinic through the same session.
+    await apply_clinic_scope(session, ClinicScope(clinic_id=graph.clinic_id))
     return booking.id

@@ -30,14 +30,16 @@ from tests.integration.factories import (
     appointment,
     at,
     create_graph,
+    scope_client,
 )
 
 PATIENT_DATA_ROUTES = re.compile(r"^/review/(patients|appointments|consents|phone-bindings)")
 
 
-async def _prepare(session: AsyncSession) -> tuple[Graph, uuid.UUID]:
+async def _prepare(session: AsyncSession, client: TestClient) -> tuple[Graph, uuid.UUID]:
     graph = await create_graph(session)
     appointment_id = await add_patient_records(session, graph)
+    scope_client(client, graph)
     return graph, appointment_id
 
 
@@ -56,7 +58,7 @@ def _records_returned(body: object) -> int:
 async def test_every_patient_data_route_records_an_audit_entry(
     session: AsyncSession, client: TestClient
 ) -> None:
-    graph, appointment_id = await _prepare(session)
+    graph, appointment_id = await _prepare(session, client)
     paths = [
         path
         for path, operations in client.get("/openapi.json").json()["paths"].items()
@@ -78,7 +80,7 @@ async def test_every_patient_data_route_records_an_audit_entry(
 async def test_patient_detail_masks_identifiers_and_includes_related_records(
     session: AsyncSession, client: TestClient
 ) -> None:
-    graph, _ = await _prepare(session)
+    graph, _ = await _prepare(session, client)
     body = client.get(f"/review/patients/{graph.patient_id}").json()
 
     assert body["given_names"] == "Ana"
@@ -111,7 +113,7 @@ async def test_identifiers_are_stored_as_ciphertext(
 
 
 async def test_blind_index_lookup(session: AsyncSession, client: TestClient) -> None:
-    await _prepare(session)
+    await _prepare(session, client)
     assert client.get("/review/patients", params={"phone": PHONE}).json()["total"] == 1
     assert client.get("/review/patients", params={"phone": "+573009999999"}).json()["total"] == 0
     assert client.get("/review/patients", params={"document_number": DOCUMENT}).json()["total"] == 1
@@ -120,7 +122,7 @@ async def test_blind_index_lookup(session: AsyncSession, client: TestClient) -> 
 async def test_soft_deleted_patient_disappears_from_every_patient_query(
     session: AsyncSession, client: TestClient
 ) -> None:
-    graph, appointment_id = await _prepare(session)
+    graph, appointment_id = await _prepare(session, client)
     patient = await session.get(Patient, graph.patient_id)
     assert patient is not None
     patient.deleted_at = at(1, 0)
@@ -138,7 +140,7 @@ async def test_soft_deleted_patient_disappears_from_every_patient_query(
 async def test_shared_handset_lists_both_patients_without_the_number(
     session: AsyncSession, client: TestClient
 ) -> None:
-    await _prepare(session)
+    await _prepare(session, client)
     [handset] = client.get("/review/phone-bindings/shared").json()
     assert handset["patient_count"] == 2
     assert {m["relationship_kind"] for m in handset["members"]} == {"self", "guardian"}
@@ -146,7 +148,7 @@ async def test_shared_handset_lists_both_patients_without_the_number(
 
 
 async def test_appointment_filters(session: AsyncSession, client: TestClient) -> None:
-    graph, _ = await _prepare(session)
+    graph, _ = await _prepare(session, client)
     session.add(appointment(graph, at(6, 9), status=AppointmentStatus.CANCELLED))
     await session.commit()
 
@@ -163,6 +165,7 @@ async def test_appointment_filters(session: AsyncSession, client: TestClient) ->
 
 async def test_doctor_detail_lists_availability(session: AsyncSession, client: TestClient) -> None:
     graph = await create_graph(session)
+    scope_client(client, graph)
     session.add(
         AvailabilityRule(
             clinic_id=graph.clinic_id,
@@ -185,7 +188,16 @@ async def test_doctor_detail_lists_availability(session: AsyncSession, client: T
     "path", ["/review/patients/{id}", "/review/appointments/{id}", "/review/doctors/{id}"]
 )
 def test_unknown_ids_return_404(client: TestClient, path: str) -> None:
-    assert client.get(path.format(id=uuid.uuid4())).status_code == 404
+    params = {"clinic_id": str(uuid.uuid4())}
+    assert client.get(path.format(id=uuid.uuid4()), params=params).status_code == 404
+
+
+@pytest.mark.parametrize(
+    "path", ["/review/patients", "/review/appointments", "/review/doctors", "/review/summary"]
+)
+def test_clinic_id_is_required(client: TestClient, path: str) -> None:
+    """No route serving clinic data may be queried without naming the clinic."""
+    assert client.get(path).status_code == 422
 
 
 def test_page_size_is_bounded(client: TestClient) -> None:
@@ -194,7 +206,7 @@ def test_page_size_is_bounded(client: TestClient) -> None:
 
 
 async def test_summary_and_audit_chain(session: AsyncSession, client: TestClient) -> None:
-    await _prepare(session)
+    await _prepare(session, client)
     summary = client.get("/review/summary").json()
     assert summary["row_counts"]["patients"] == 2
     assert summary["appointments_by_status"] == {"scheduled": 1}

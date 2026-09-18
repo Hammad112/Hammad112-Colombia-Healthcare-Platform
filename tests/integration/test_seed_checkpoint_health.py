@@ -18,6 +18,7 @@ from src.audit.models import AccessLogEntry
 from src.audit.service import verify_chain
 from src.conversation.checkpointer import CHECKPOINT_SCHEMA, open_checkpointer
 from src.core.config import Settings
+from src.core.tenancy import ClinicScope, apply_clinic_scope
 from src.core.timezones import BOGOTA
 from src.devdata.seed import (
     APPOINTMENTS_PER_DOCTOR,
@@ -36,6 +37,8 @@ async def test_seed_creates_expected_records_and_audits_them(
     await session.commit()
 
     assert report is not None
+    # The commit ended the transaction the seeder scoped; the reads below need it back.
+    await apply_clinic_scope(session, ClinicScope(clinic_id=report.clinic_id))
     assert (report.patients, report.doctors) == (20, 3)
     assert report.appointments == 3 * APPOINTMENTS_PER_DOCTOR
     assert len((await session.scalars(select(Patient))).all()) == 20
@@ -65,8 +68,10 @@ async def test_seeded_appointments_never_overlap(
 ) -> None:
     # The exclusion constraint would reject overlaps; this documents that the
     # seeder produces a valid schedule rather than relying on luck.
-    await seed_synthetic_data(session, patients=10, doctors=2)
+    report = await seed_synthetic_data(session, patients=10, doctors=2)
     await session.commit()
+    assert report is not None
+    await apply_clinic_scope(session, ClinicScope(clinic_id=report.clinic_id))
     rows = (await session.scalars(select(Appointment))).all()
     assert len(rows) == 2 * APPOINTMENTS_PER_DOCTOR
 
