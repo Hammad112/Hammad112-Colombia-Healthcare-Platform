@@ -281,12 +281,16 @@ async def seed_synthetic_data(
 
 
 async def run_seed(*, patients: int = 200, doctors: int = 8) -> SeedReport | None:
-    """Seed in its own transaction as the runtime role. Refuses outside synthetic-data mode."""
+    """Seed in its own transaction as the runtime role.
+
+    Allowed in any environment while ALLOW_REAL_PATIENT_DATA is false, and refused
+    once it is true, so synthetic records never sit beside real ones.
+    """
     settings = get_settings()
-    if not settings.synthetic_data_mode:
+    if not settings.synthetic_seeding_allowed:
         raise RuntimeError(
-            "Synthetic seeding is allowed only when APP_ENV is local or ci "
-            "and ALLOW_REAL_PATIENT_DATA is false."
+            "Synthetic seeding is refused while ALLOW_REAL_PATIENT_DATA is true: "
+            "synthetic records must never be mixed with real patient data."
         )
     context = AuditContext(actor_kind=ActorKind.SYSTEM, purpose="synthetic_seed", actor_id="seeder")
     try:
