@@ -25,7 +25,8 @@ read-only review API over synthetic data, and CI. No patient messaging exists ye
 ```bash
 python -m venv .venv
 .venv\Scripts\activate          # macOS/Linux: source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -r requirements.lock   # the exact versions CI tests with
+pip install -e . --no-deps
 cp .env.example .env              # then set POSTGRES_PASSWORD to your postgres password
 
 python main.py

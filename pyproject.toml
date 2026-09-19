@@ -29,7 +29,9 @@ dev = [
     "mypy>=1.13",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
-    "ruff>=0.7",
+    # Pinned exactly: ruff's formatter changes between releases, so an unpinned
+    # version makes pre-commit and CI disagree about the same file.
+    "ruff==0.16.8",
 ]
 
 [build-system]
