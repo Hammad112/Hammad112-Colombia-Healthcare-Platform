@@ -27,7 +27,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: pip install -e ".[dev]"
+      # Install the exact tested versions, then the project without re-resolving them.
+      - run: pip install -r requirements.lock
+      - run: pip install -e . --no-deps
       - run: ruff check .
       - run: ruff format --check .
       - run: mypy src main.py
@@ -66,7 +68,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: pip install -e ".[dev]"
+      # Install the exact tested versions, then the project without re-resolving them.
+      - run: pip install -r requirements.lock
+      - run: pip install -e . --no-deps
       - name: Provision, migrate and seed from an empty server
         run: python main.py --no-serve
       - name: Tests (integration tests use a separate clinic_test database)
