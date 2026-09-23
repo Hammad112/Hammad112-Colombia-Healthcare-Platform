@@ -23,8 +23,29 @@ dependencies = [
 seed = [
     "faker>=30",
 ]
+# Spreadsheet onboarding (src/onboarding). Parsing untrusted clinic files.
+onboarding = [
+    # One Rust parser for xlsx/xls/xlsb/ods that returns cached formula values.
+    "python-calamine>=0.5",
+    # Structure only (hidden sheets, merged ranges, true dimensions).
+    "openpyxl>=3.1",
+    # openpyxl does not guard billion-laughs/quadratic-blowup without this installed.
+    "defusedxml>=0.7",
+    # Detects a wrong decoding; never used to silently repair a patient's name.
+    "ftfy>=6.2",
+    "rapidfuzz>=3.10",
+    # libphonenumber metadata; a hand-rolled regex would not track the 2021 renumbering.
+    "phonenumbers>=8.13",
+]
+# Column mapping that calls a model. Optional: without it the pipeline still runs,
+# and ambiguous columns go to the human instead of to a model.
+mapping = [
+    "clinic-scheduler[onboarding]",
+    "openai>=1.54",
+]
 dev = [
     "clinic-scheduler[seed]",
+    "clinic-scheduler[mapping]",
     "httpx>=0.27",
     "mypy>=1.13",
     "pytest>=8.3",
