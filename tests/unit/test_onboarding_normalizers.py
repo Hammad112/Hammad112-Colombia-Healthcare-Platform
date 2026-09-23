@@ -293,3 +293,52 @@ def test_accents_are_stripped_for_matching_but_never_for_storage() -> None:
     assert n.strip_accents("Muñoz") == "munoz"
     # The value itself survives untouched through a normalizer that stores it.
     assert n.split_full_name("Diana Muñoz").value.family_names == "Muñoz"
+
+
+# ------------------------------------------------------- empty and unparseable
+# Every normalizer is reached by a real clinic file containing blanks and
+# typos. These paths decide whether a malformed cell stops the import or slips
+# through as a wrong value, so each one is pinned even though none is exotic.
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [
+        (n.document_type(""), n.Status.REVIEW),
+        (n.document_number(""), n.Status.INVALID),
+        (n.document_number("!!!"), n.Status.REVIEW),
+        (n.phone(""), n.Status.REVIEW),
+        (n.phone("no tiene"), n.Status.REVIEW),
+        # A name ending in a connecting word is truncated, not a name.
+        (n.split_full_name("Ana de"), n.Status.REVIEW),
+        (n.date("", order=n.DayFirst.DAY_FIRST), n.Status.REVIEW),
+        (n.date("pendiente", order=n.DayFirst.DAY_FIRST), n.Status.REVIEW),
+        (n.date("2026-13-45", order=n.DayFirst.DAY_FIRST), n.Status.INVALID),
+        (n.time_of_day(""), n.Status.REVIEW),
+        # 13 has no meaning on a 12-hour clock.
+        (n.time_of_day("13:00 a. m."), n.Status.INVALID),
+        (n.time_of_day("por confirmar"), n.Status.REVIEW),
+        # A day fraction must be below 1.0.
+        (n.time_of_day("1.5"), n.Status.REVIEW),
+        (n.appointment_status(""), n.Status.REVIEW),
+        (n.appointment_status("zzz"), n.Status.REVIEW),
+    ],
+)
+def test_empty_and_unparseable_values_never_convert(
+    outcome: n.Outcome[object], expected: n.Status
+) -> None:
+    assert outcome.status is expected
+    assert outcome.value is None
+    # Every refusal names the rule that produced it, so the transform log can
+    # tell a reviewer why the cell stopped (ADR-08a).
+    assert outcome.rule
+    assert outcome.message
+
+
+def test_a_non_date_value_does_not_derail_the_column_decision() -> None:
+    """Real date columns contain stray notes like "pendiente" or a blank.
+
+    Those are skipped when deciding the column's order, so one junk cell cannot
+    force an otherwise decidable column into manual review — nor can it decide
+    a column on its own.
+    """
+    assert n.detect_day_first(["15/10/2026", "pendiente", "", "03/04/1991"]) is n.DayFirst.DAY_FIRST
+    assert n.detect_day_first(["pendiente", "por confirmar"]) is n.DayFirst.UNDECIDED

@@ -54,6 +54,9 @@ dev = [
     "types-defusedxml>=0.7",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
+    # Coverage is how untested refusal paths were found; they are the paths that
+    # matter most, because a refusal that silently succeeds corrupts data.
+    "pytest-cov>=6.0",
     # Pinned exactly: ruff's formatter changes between releases, so an unpinned
     # version makes pre-commit and CI disagree about the same file.
     "ruff==0.16.8",

@@ -248,3 +248,75 @@ def test_values_are_returned_as_text_without_inference() -> None:
     assert first[columns["IDENTIFICACION"]] == "123456"
     # The Spanish 12-hour form keeps its non-breaking space for the normalizer.
     assert " " in first[columns["HORA"]]
+
+
+# ----------------------------------------------------------- refusal paths
+# Coverage showed these branches untested. They are the ones that decide whether
+# a malformed upload stops with a message a receptionist can act on, or crashes
+# with a stack trace the API cannot report.
+def test_an_empty_file_is_refused(tmp_path: Path) -> None:
+    empty = tmp_path / "empty.csv"
+    empty.write_text("", encoding="utf-8")
+    with pytest.raises(UnreadableFile, match="empty"):
+        read(empty)
+
+
+def test_a_workbook_with_no_rows_is_refused(tmp_path: Path) -> None:
+    from openpyxl import Workbook
+
+    path = tmp_path / "blank.xlsx"
+    Workbook().save(path)
+    with pytest.raises(UnreadableFile, match="no readable sheet"):
+        read(path)
+
+
+def test_a_truncated_archive_is_refused_not_crashed(tmp_path: Path) -> None:
+    """The magic bytes claim an archive; the contents are not one.
+
+    Without this the reader raises BadZipFile, which the upload endpoint cannot
+    turn into an explanation for the person who uploaded the file.
+    """
+    path = tmp_path / "truncated.xlsx"
+    path.write_bytes(b"PK\x03\x04" + b"nonsense" * 20)
+    with pytest.raises(UnreadableFile, match="not a valid archive"):
+        read(path)
+
+
+def test_a_single_column_file_is_read_not_refused(tmp_path: Path) -> None:
+    """A list of document numbers is a legitimate import with no delimiter."""
+    path = tmp_path / "one.csv"
+    path.write_text("DOCUMENTO\n1045678901\n1023456789\n", encoding="utf-8")
+    sheet = read(path).sheets[0]
+    assert sheet.headers == ("DOCUMENTO",)
+    assert len(sheet.rows) == 2
+
+
+def test_legacy_xls_is_refused_with_advice(tmp_path: Path) -> None:
+    """The OLE2 format needs a different parser; say so rather than failing oddly."""
+    path = tmp_path / "old.xls"
+    path.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 64)
+    with pytest.raises(UnreadableFile, match="xlsx"):
+        read(path)
+
+
+def test_a_header_with_an_unlabelled_column_keeps_every_row(tmp_path: Path) -> None:
+    """A blank header cell made the header row look narrower than the data.
+
+    The first patient was then promoted to column names and lost, and every
+    column was mislabelled, with no error anywhere.
+    """
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    sheet = workbook.active
+    assert sheet is not None
+    sheet.append(["NOMBRE", "", None, "EPS"])
+    sheet.append(["Ana Gómez", "x", "y", "Sura"])
+    sheet.append(["Luis Castro", "p", "q", "Nueva EPS"])
+    path = tmp_path / "gap.xlsx"
+    workbook.save(path)
+
+    result = read(path).sheets[0]
+    assert result.header_row == 1
+    assert result.headers[0] == "NOMBRE"
+    assert len(result.rows) == 2
