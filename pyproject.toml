@@ -48,6 +48,10 @@ dev = [
     "clinic-scheduler[mapping]",
     "httpx>=0.27",
     "mypy>=1.13",
+    # Stubs for the onboarding parsers, so mypy checks this code rather than
+    # treating every openpyxl call as Any.
+    "types-openpyxl>=3.1",
+    "types-defusedxml>=0.7",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     # Pinned exactly: ruff's formatter changes between releases, so an unpinned
@@ -71,6 +75,11 @@ select = ["E", "F", "I", "UP", "B", "S", "ASYNC", "SIM", "RUF"]
 ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
+# These files deliberately contain U+00A0 and U+202F: the Spanish 12-hour clock
+# format Excel writes ("8:30 a. m.") uses them, and a normalizer that splits on
+# an ordinary space silently fails on it. Removing them would remove the test.
+"tests/fixtures/onboarding/generate.py" = ["RUF001"]
+"tests/unit/test_onboarding_reader.py" = ["RUF001"]
 # Assertions and fixed test credentials are expected in tests.
 "tests/**" = ["S101", "S105", "S106"]
 # Synthetic data deliberately uses a non-cryptographic seeded generator.

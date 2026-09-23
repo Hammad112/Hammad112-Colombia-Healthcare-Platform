@@ -187,7 +187,16 @@ def receptionist() -> Path:
     ws.merge_cells("G4:H4")
     ws.append([])  # keeps openpyxl's row pointer honest
     for column, value in enumerate(
-        ["TIPO DOC", "IDENTIFICACION", "NOMBRE COMPLETO", "FECHA", "HORA", "MEDICO", "CELULAR", "EPS"],
+        [
+            "TIPO DOC",
+            "IDENTIFICACION",
+            "NOMBRE COMPLETO",
+            "FECHA",
+            "HORA",
+            "MEDICO",
+            "CELULAR",
+            "EPS",
+        ],
         start=1,
     ):
         ws.cell(row=5, column=column, value=value)
@@ -207,7 +216,7 @@ def receptionist() -> Path:
 
     # Two hidden rows holding real patients. They must be imported, and flagged:
     # hiding a row is not a deletion, and silently dropping them loses patients.
-    for doc_type, doc, given, family, phone, eps in (
+    for _doc_type, doc, given, family, phone, eps in (
         ("CC", "1032165498", "Claudia Patricia", "Escobar Rendón", "3178901299", "Sura"),
         ("CC", SENTINEL_DOCUMENT, *SENTINEL_NAME.split(maxsplit=1), SENTINEL_PHONE, "Nueva EPS"),
     ):
@@ -262,12 +271,52 @@ def excel_csv_es() -> Path:
     scores delimiters instead of guessing.
     """
     rows = [
-        ["TIPO DOC", "IDENTIFICACION", "NOMBRE COMPLETO", "CELULAR", "EPS", "VALOR COPAGO", "DIRECCION"],
-        ["C.C.", "1045678901", "Carlos Andrés Pérez Gómez", "3001234567", "Sura", "1.250,50", "Calle 10 # 5-20"],
-        ["C.C.", "1023456789", 'María Fernanda "Mafe" López', "3119876543", "Nueva EPS", "0,00", "Cra 7 # 12-34"],
+        [
+            "TIPO DOC",
+            "IDENTIFICACION",
+            "NOMBRE COMPLETO",
+            "CELULAR",
+            "EPS",
+            "VALOR COPAGO",
+            "DIRECCION",
+        ],
+        [
+            "C.C.",
+            "1045678901",
+            "Carlos Andrés Pérez Gómez",
+            "3001234567",
+            "Sura",
+            "1.250,50",
+            "Calle 10 # 5-20",
+        ],
+        [
+            "C.C.",
+            "1023456789",
+            'María Fernanda "Mafe" López',
+            "3119876543",
+            "Nueva EPS",
+            "0,00",
+            "Cra 7 # 12-34",
+        ],
         # An embedded newline inside a quoted field.
-        ["T.I.", "1102345678", "Luisa Fernanda Ortiz Mejía", "3067891234", "Nueva EPS", "15.300,75", "Av. Siempre Viva 742\nApto 301"],
-        ["C.C.", SENTINEL_DOCUMENT, SENTINEL_NAME, SENTINEL_PHONE, "Coosalud", "2.000,00", "Calle 1"],
+        [
+            "T.I.",
+            "1102345678",
+            "Luisa Fernanda Ortiz Mejía",
+            "3067891234",
+            "Nueva EPS",
+            "15.300,75",
+            "Av. Siempre Viva 742\nApto 301",
+        ],
+        [
+            "C.C.",
+            SENTINEL_DOCUMENT,
+            SENTINEL_NAME,
+            SENTINEL_PHONE,
+            "Coosalud",
+            "2.000,00",
+            "Calle 1",
+        ],
     ]
     path = HERE / "3_excel_csv_es.csv"
     with path.open("w", encoding="cp1252", newline="") as handle:
@@ -297,28 +346,94 @@ def corrupted() -> Path:
     ws.title = "Datos"
     ws.append(
         [
-            "IDENTIFICACION",       # numeric: leading zeros already destroyed
-            "DOCUMENTO_LARGO",      # scientific notation: digits unrecoverable
+            "IDENTIFICACION",  # numeric: leading zeros already destroyed
+            "DOCUMENTO_LARGO",  # scientific notation: digits unrecoverable
             "NOMBRE COMPLETO",
-            "FECHA_NACIMIENTO",     # every value <= 12: DD/MM vs MM/DD undecidable
-            "FECHA_CITA",           # has a value > 12: decidable as day-first
-            "FECHA_SERIAL",         # raw Excel serial numbers
-            "HORA",                 # "8:30 a. m." with a non-breaking space
-            "HORA_FRACCION",        # time as a fraction of a day
-            "ASISTIO",              # SI / Sí / X / 1 / blank / N/A
+            "FECHA_NACIMIENTO",  # every value <= 12: DD/MM vs MM/DD undecidable
+            "FECHA_CITA",  # has a value > 12: decidable as day-first
+            "FECHA_SERIAL",  # raw Excel serial numbers
+            "HORA",  # "8:30 a. m." with a non-breaking space
+            "HORA_FRACCION",  # time as a fraction of a day
+            "ASISTIO",  # SI / Sí / X / 1 / blank / N/A
             "TELEFONO",
         ]
     )
 
     rows: list[list[object]] = [
         # Leading zero gone: the cell is a number, so 0123456 became 123456.
-        [123456, 1.23457e11, "Carlos Andrés Pérez Gómez", "03/04/1991", "15/10/2026", 46300, "8:30 a. m.", 0.354166666, "SI", "3001234567"],
-        [1023456789, 1.02345e11, "María Fernanda López Torres", "05/06/1985", "22/10/2026", 45900, "2:30 p. m.", 0.604166666, "Sí", "+57 311 987 6543"],
-        [71234567, 9.87654e10, "Luis Ernesto Castro Vargas", "11/12/1990", "03/11/2026", 46000, "10:00 a. m.", 0.416666666, "X", "3204567890"],
-        [43567890, 4.35679e10, "Diana Carolina Muñoz Restrepo", "07/08/1979", "28/10/2026", 46100, "11:15 a. m.", 0.46875, 1, "315 678 9012"],
-        [1102345678, 1.10235e11, SENTINEL_NAME, "02/03/1995", "09/11/2026", 46200, "9:45 a. m.", 0.40625, None, SENTINEL_PHONE],
+        [
+            123456,
+            1.23457e11,
+            "Carlos Andrés Pérez Gómez",
+            "03/04/1991",
+            "15/10/2026",
+            46300,
+            "8:30 a. m.",
+            0.354166666,
+            "SI",
+            "3001234567",
+        ],
+        [
+            1023456789,
+            1.02345e11,
+            "María Fernanda López Torres",
+            "05/06/1985",
+            "22/10/2026",
+            45900,
+            "2:30 p. m.",
+            0.604166666,
+            "Sí",
+            "+57 311 987 6543",
+        ],
+        [
+            71234567,
+            9.87654e10,
+            "Luis Ernesto Castro Vargas",
+            "11/12/1990",
+            "03/11/2026",
+            46000,
+            "10:00 a. m.",
+            0.416666666,
+            "X",
+            "3204567890",
+        ],
+        [
+            43567890,
+            4.35679e10,
+            "Diana Carolina Muñoz Restrepo",
+            "07/08/1979",
+            "28/10/2026",
+            46100,
+            "11:15 a. m.",
+            0.46875,
+            1,
+            "315 678 9012",
+        ],
+        [
+            1102345678,
+            1.10235e11,
+            SENTINEL_NAME,
+            "02/03/1995",
+            "09/11/2026",
+            46200,
+            "9:45 a. m.",
+            0.40625,
+            None,
+            SENTINEL_PHONE,
+        ],
         # 8 digits starting with 3: a mobile that lost a digit. Unrecoverable.
-        [1067891234, 1.06789e11, "Andrés Felipe Suárez Vélez", "10/11/1988", "17/11/2026", 46400, "3:00 p. m.", 0.625, "N/A", "30987654"],
+        [
+            1067891234,
+            1.06789e11,
+            "Andrés Felipe Suárez Vélez",
+            "10/11/1988",
+            "17/11/2026",
+            46400,
+            "3:00 p. m.",
+            0.625,
+            "N/A",
+            "30987654",
+        ],
     ]
     for row in rows:
         ws.append(row)
@@ -412,9 +527,10 @@ _XXE_SHARED_STRINGS = (
 def _rewrite_dimension(path: Path, dimension: str) -> None:
     """Replace the declared sheet dimension, leaving the real rows in place."""
     temporary = path.with_suffix(".tmp")
-    with zipfile.ZipFile(path) as source, zipfile.ZipFile(
-        temporary, "w", compression=zipfile.ZIP_DEFLATED
-    ) as target:
+    with (
+        zipfile.ZipFile(path) as source,
+        zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as target,
+    ):
         for item in source.infolist():
             data = source.read(item.filename)
             if item.filename == "xl/worksheets/sheet1.xml":
