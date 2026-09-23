@@ -78,8 +78,13 @@ ignore = ["E501"]
 # These files deliberately contain U+00A0 and U+202F: the Spanish 12-hour clock
 # format Excel writes ("8:30 a. m.") uses them, and a normalizer that splits on
 # an ordinary space silently fails on it. Removing them would remove the test.
+# U+00A0 and U+202F are the characters this module exists to handle: Spanish
+# Excel writes "8:30 a. m." with them, and a parser that splits on an ordinary
+# space fails silently on every time in the file.
+"src/onboarding/normalizers.py" = ["RUF001"]
 "tests/fixtures/onboarding/generate.py" = ["RUF001"]
 "tests/unit/test_onboarding_reader.py" = ["RUF001"]
+"tests/unit/test_onboarding_normalizers.py" = ["RUF001"]
 # Assertions and fixed test credentials are expected in tests.
 "tests/**" = ["S101", "S105", "S106"]
 # Synthetic data deliberately uses a non-cryptographic seeded generator.
