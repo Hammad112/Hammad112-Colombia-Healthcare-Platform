@@ -51,6 +51,12 @@ ENCODING_LADDER: Final = ("utf-8-sig", "utf-8", "cp1252", "latin-1")
 # where the comma is the decimal separator.
 _CANDIDATE_DELIMITERS: Final = (";", ",", "\t", "|")
 
+# Returned when no candidate delimiter splits the file. A one-column list of
+# document numbers is a legitimate import, so it is read as a single column
+# rather than refused. ASCII record separator does not occur in spreadsheet
+# text, so no line is ever split on it.
+SINGLE_COLUMN: Final = chr(30)
+
 
 class UnreadableFile(Exception):
     """The file cannot be read safely, or cannot be read without guessing."""
@@ -90,7 +96,14 @@ def inspect_archive(path: Path) -> None:
     so it is treated as a claim to check rather than a fact, and the real
     expansion is measured by decompressing with a cap.
     """
-    with zipfile.ZipFile(path) as archive:
+    try:
+        archive_context = zipfile.ZipFile(path)
+    except zipfile.BadZipFile as error:
+        raise UnreadableFile(
+            "File starts like a spreadsheet but is not a valid archive; it may be truncated."
+        ) from error
+
+    with archive_context as archive:
         members = archive.infolist()
         if len(members) > MAX_ARCHIVE_MEMBERS:
             raise UnreadableFile(
@@ -185,7 +198,10 @@ def sniff_delimiter(sample: str) -> str:
         scored.append((top / len(widths), width, delimiter))
 
     if not scored:
-        raise UnreadableFile("No delimiter splits this file into columns; it may not be a CSV.")
+        # A one-column file is a legitimate import (a list of document numbers,
+        # say), so it is read as a single column rather than refused. The
+        # delimiter is one that cannot occur in text, so nothing is split.
+        return SINGLE_COLUMN
 
     # Ranked on agreement first, then width. Both are properties of the file, so
     # the answer does not depend on the order the candidates were tried in.
@@ -295,12 +311,15 @@ def _find_header_row(worksheet: Worksheet, probe: int = 25) -> int:
     if best_score <= 0:
         return 1
 
-    # The widest well-scoring row, and then the earliest row that is both
-    # near-best and near-as-wide: a title row spanning merged cells reads as one
-    # filled cell, while the real header fills the table's full width.
-    widest = max(filled for _, score, filled in scores if score >= best_score * 0.85)
+    # A header must span most of the table, which rules out a title row: merged
+    # across the sheet it still reads as one filled cell. Width is measured
+    # against the widest row on the sheet rather than against other candidates,
+    # because a header with an unlabelled column ("NOMBRE", "", "", "EPS") is
+    # narrower than the data beneath it and would otherwise lose to row 2 —
+    # promoting a patient row to the header and dropping that patient.
+    table_width = max(filled for _, _, filled in scores)
     for row_index, score, filled in scores:
-        if score >= best_score * 0.85 and filled >= widest * 0.8:
+        if score >= best_score * 0.85 and filled >= table_width * 0.5:
             return row_index
     return 1
 
