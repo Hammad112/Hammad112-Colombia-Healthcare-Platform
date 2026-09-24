@@ -203,7 +203,12 @@ def phone(raw: str, *, region: str = "CO") -> Outcome[str]:
 
     A number that does not exist is never "corrected": the nearest valid number
     belongs to somebody else, and a reminder sent there is a disclosure to a
-    stranger. The patient is still imported; only the number is flagged.
+    stranger.
+
+    The outcome is `review`, which holds the **whole row** back until a person
+    answers it, because a row is only as importable as its least certain cell.
+    Whether an otherwise-good patient should instead import with the phone left
+    empty is a product decision, not this function's to make.
     """
     text = raw.strip()
     if not text:
