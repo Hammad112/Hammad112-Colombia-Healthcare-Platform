@@ -175,6 +175,29 @@ def _ask_model(sheet: Sheet, entity: Entity, mapping: SheetMapping) -> dict[str,
     return improved
 
 
+def reanalyse(sheet: Sheet, entity: Entity) -> SheetReport:
+    """Re-propose a sheet's columns under an entity a reviewer chose.
+
+    A sheet called AGENDA carrying patient columns is genuinely ambiguous, so
+    when the reviewer says what it is, its columns are matched against that
+    entity's fields rather than the one that was guessed.
+    """
+    mapping = match_sheet(sheet.headers, entity)
+    return SheetReport(
+        sheet=sheet.name,
+        entity=entity,
+        entity_reason="Chosen by the reviewer.",
+        columns=tuple(_column_report(p) for p in mapping.proposals),
+        missing_required=mapping.missing_required,
+        total_rows=len(sheet.rows),
+        valid_rows=0,
+        review_rows=0,
+        invalid_rows=0,
+        warnings=sheet.warnings,
+        questions=_column_questions(sheet, mapping),
+    )
+
+
 def analyse_sheet_for_test(sheet: Sheet) -> SheetReport:
     """Analyse one sheet. Exposed for tests that build a sheet directly."""
     return _analyse_sheet(sheet)
@@ -246,6 +269,7 @@ def validate(
     mapping: dict[str, str | None],
     *,
     decisions: ColumnDecisions | None = None,
+    excluded_rows: set[int] | None = None,
 ) -> tuple[list[RowResult], tuple[ColumnReport, ...]]:
     """Run every normalizer over every row of one sheet.
 
@@ -272,7 +296,13 @@ def validate(
     rows: list[RowResult] = []
     counts: dict[str, Counter[str]] = {column: Counter() for column in mapping}
 
+    excluded = excluded_rows or set()
     for offset, raw_row in enumerate(sheet.rows, start=sheet.header_row + 1):
+        # A row the reviewer marked as not a record — a totals line, the heading
+        # of a second table — is left out entirely rather than counted as a
+        # broken patient, which would block the import for no reason.
+        if offset in excluded:
+            continue
         row = RowResult(
             row_number=offset,
             entity=entity,

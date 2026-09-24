@@ -96,6 +96,19 @@ def _decisions_of(record: Any, sheet: str) -> dict[str, str]:
     return dict((record.report or {}).get("decisions", {}).get(sheet, {}))
 
 
+def _excluded_of(record: Any, sheet: str) -> set[int]:
+    return set((record.report or {}).get("excluded", {}).get(sheet, []))
+
+
+#: Sent as a sheet's `entity` to leave it out of the import entirely.
+SKIP_SHEET: Final = "skip"
+
+
+def stored_skips(record: Any) -> list[str]:
+    """Sheets the reviewer has said not to import."""
+    return list((record.report or {}).get("skipped_sheets", []))
+
+
 def _default_mapping(report: service.SheetReport) -> dict[str, str | None]:
     """What the reviewer sees pre-ticked: confident proposals only."""
     return {c.column: (c.target_field if c.auto else None) for c in report.columns}
@@ -233,11 +246,12 @@ async def set_mapping(
     A field may be mapped from at most one column: two columns writing one field
     would mean one of them silently wins.
     """
-    record, _ = await _load(db, session_id, scope.clinic_id)
+    record, parsed = await _load(db, session_id, scope.clinic_id)
     reports = _reports(record)
     report = next((r for r in reports if r.sheet == body.sheet), None)
     if report is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"No sheet named {body.sheet!r}.")
+    index = reports.index(report)
 
     known = {c.column for c in report.columns}
     unknown = set(body.mapping) - known
@@ -263,10 +277,41 @@ async def set_mapping(
     merged = dict(mappings.get(body.sheet, {}))
     merged.update(body.mapping)
     mappings[body.sheet] = merged
+    excluded = dict(stored.get("excluded", {}))
+    if body.excluded_rows:
+        excluded[body.sheet] = sorted(set(excluded.get(body.sheet, [])) | set(body.excluded_rows))
     decisions[body.sheet] = dict(body.decisions)
 
-    reports[reports.index(report)] = service.apply_profile(report, mappings[body.sheet])
-    _store_reports(record, reports, mappings=mappings, decisions=decisions)
+    if body.entity == SKIP_SHEET:
+        # A workbook often carries a stale sheet nobody wants imported. Clearing
+        # its columns one at a time is not a workflow, so the reviewer says so
+        # once and validate leaves the sheet alone.
+        skipped_sheets = sorted({*stored_skips(record), body.sheet})
+        _store_reports(record, reports, skipped_sheets=skipped_sheets)
+        record.status = "mapped"
+        await db.flush()
+        return await get_upload(db, session_id, scope)
+
+    if body.entity and body.entity not in {e.value for e in Entity}:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"{body.entity!r} is not a kind of sheet. Choose one of "
+            f"{[*sorted(e.value for e in Entity), SKIP_SHEET]}.",
+        )
+
+    if body.entity and body.entity != report.entity.value:
+        # The sheet holds something other than we guessed, so its columns are
+        # matched again against the right set of fields rather than kept.
+        sheet = next(s for s in parsed.sheets if s.name == body.sheet)
+        report = service.reanalyse(sheet, Entity(body.entity))
+        reports[index] = report
+        if not body.mapping:
+            # No corrections came with the change, so start from the fresh proposal.
+            merged = _default_mapping(report)
+            mappings[body.sheet] = merged
+
+    reports[index] = service.apply_profile(report, mappings[body.sheet])
+    _store_reports(record, reports, mappings=mappings, decisions=decisions, excluded=excluded)
     record.status = "mapped"
     await db.flush()
     return await get_upload(db, session_id, scope)
@@ -286,18 +331,25 @@ async def validate(db: SessionDep, session_id: uuid.UUID, scope: ClinicScopeDep)
     record, parsed = await _load(db, session_id, scope.clinic_id)
     reports = _reports(record)
 
+    skipped_sheets = stored_skips(record)
     summaries: list[service.SheetReport] = []
     blocking: list[str] = []
     totals = {"valid": 0, "review": 0, "invalid": 0}
 
     for report in reports:
         sheet = next(s for s in parsed.sheets if s.name == report.sheet)
+        if report.sheet in skipped_sheets:
+            continue  # the reviewer said this sheet is not part of the import
         mapping = _mapping_of(record, report.sheet)
         if not any(mapping.values()):
             continue  # nothing confirmed for this sheet, so nothing to import
 
         rows, columns = service.validate(
-            sheet, report.entity, mapping, decisions=_decisions_of(record, report.sheet)
+            sheet,
+            report.entity,
+            mapping,
+            decisions=_decisions_of(record, report.sheet),
+            excluded_rows=_excluded_of(record, report.sheet),
         )
         await repository.replace_staging(
             db,
@@ -331,7 +383,7 @@ async def validate(db: SessionDep, session_id: uuid.UUID, scope: ClinicScopeDep)
     record.valid_rows = totals["valid"]
     record.review_rows = totals["review"]
     record.invalid_rows = totals["invalid"]
-    _store_reports(record, summaries or reports, blocking=blocking)
+    _store_reports(record, summaries or reports, blocking=blocking, skipped_sheets=skipped_sheets)
     await db.flush()
 
     return ValidationOut(
@@ -471,13 +523,20 @@ async def commit(
     # Specialties before doctors, so a doctor can reference the catalogue its
     # own file defines.
     order = {Entity.SPECIALTY: 0, Entity.PATIENT: 1, Entity.DOCTOR: 2}
+    skipped_sheets = stored_skips(record)
     for report in sorted(_reports(record), key=lambda r: order.get(r.entity, 9)):
+        if report.sheet in skipped_sheets:
+            continue
         mapping = _mapping_of(record, report.sheet)
         if not any(mapping.values()):
             continue
         sheet = next(s for s in parsed.sheets if s.name == report.sheet)
         rows, _ = service.validate(
-            sheet, report.entity, mapping, decisions=_decisions_of(record, report.sheet)
+            sheet,
+            report.entity,
+            mapping,
+            decisions=_decisions_of(record, report.sheet),
+            excluded_rows=_excluded_of(record, report.sheet),
         )
         applied = await repository.apply_rows(
             db, clinic_id=scope.clinic_id, entity=report.entity, rows=rows

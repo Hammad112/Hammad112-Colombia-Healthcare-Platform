@@ -557,3 +557,158 @@ async def test_a_deleted_patient_is_never_silently_restored(scoped: TestClient, 
     still_deleted = await session.get(Patient, victim.id)
     assert still_deleted is not None
     assert still_deleted.deleted_at is not None
+
+
+# ------------------------------------- the messy file the exit criterion turns on
+async def test_a_reviewer_can_say_what_an_ambiguous_sheet_holds(scoped: TestClient) -> None:
+    """A sheet named for a diary but holding patient columns is genuinely both.
+
+    "AGENDA" means a schedule, so the name reads as appointments, while its
+    columns are TIPO DOC, IDENTIFICACION, NOMBRE COMPLETO, CELULAR and EPS.
+    Guessing harder would be guessing; the reviewer says which it is, and the
+    columns are then matched against that entity's fields.
+    """
+    body = _upload(scoped, "2_receptionist.xlsx")
+    agenda = next(s for s in body["sheets"] if s["sheet"] == "AGENDA")
+    assert agenda["entity"] == "appointment"  # what the name alone suggests
+
+    response = scoped.put(
+        f"/onboarding/uploads/{body['session_id']}/mapping",
+        json={"sheet": "AGENDA", "mapping": {}, "entity": "patient"},
+    )
+    assert response.status_code == 200
+    corrected = next(s for s in response.json()["sheets"] if s["sheet"] == "AGENDA")
+    assert corrected["entity"] == "patient"
+    # Re-matched, not merely relabelled: the patient fields are now mapped.
+    targets = {c["target_field"] for c in corrected["columns"]}
+    assert {"document_number", "full_name", "phone_e164"} <= targets
+
+
+async def test_an_entity_the_system_does_not_have_is_refused(scoped: TestClient) -> None:
+    body = _upload(scoped, "2_receptionist.xlsx")
+    response = scoped.put(
+        f"/onboarding/uploads/{body['session_id']}/mapping",
+        json={"sheet": "AGENDA", "mapping": {}, "entity": "invoice"},
+    )
+    assert response.status_code == 422
+
+
+async def test_a_stale_sheet_can_be_left_out_of_the_import(scoped: TestClient) -> None:
+    """Workbooks carry last month's sheet. Skipping it must be one action.
+
+    "AGOSTO (viejo)" is a superseded copy with no document-type column, so it
+    blocks the whole import. Clearing its columns one at a time is not a
+    workflow a receptionist would perform, so the sheet is excluded outright.
+    """
+    body = _upload(scoped, "2_receptionist.xlsx")
+    session_id = body["session_id"]
+
+    blocked = scoped.post(f"/onboarding/uploads/{session_id}/validate").json()
+    assert any("AGOSTO" in reason for reason in blocked["blocking"])
+
+    scoped.put(
+        f"/onboarding/uploads/{session_id}/mapping",
+        json={"sheet": "AGOSTO (viejo)", "mapping": {}, "entity": "skip"},
+    )
+    after = scoped.post(f"/onboarding/uploads/{session_id}/validate").json()
+    assert not any("AGOSTO" in reason for reason in after["blocking"])
+    assert not any(s["sheet"] == "AGOSTO (viejo)" for s in after["sheets"])
+
+
+async def test_rows_below_the_table_can_be_excluded(scoped: TestClient) -> None:
+    """A hand-kept sheet ends in a total line and a second pasted table.
+
+    The importer refuses to convert those into patients, which is right, but a
+    reviewer must be able to say they are not data rather than being stuck.
+    """
+    body = _upload(scoped, "2_receptionist.xlsx")
+    session_id = body["session_id"]
+    scoped.put(
+        f"/onboarding/uploads/{session_id}/mapping",
+        json={"sheet": "AGOSTO (viejo)", "mapping": {}, "entity": "skip"},
+    )
+    scoped.put(
+        f"/onboarding/uploads/{session_id}/mapping",
+        json={"sheet": "AGENDA", "mapping": {}, "entity": "patient"},
+    )
+
+    with_junk = scoped.post(f"/onboarding/uploads/{session_id}/validate").json()
+    assert any("could not be converted" in reason for reason in with_junk["blocking"])
+
+    scoped.put(
+        f"/onboarding/uploads/{session_id}/mapping",
+        json={"sheet": "AGENDA", "mapping": {}, "excluded_rows": [17, 18, 19, 20]},
+    )
+    cleaned = scoped.post(f"/onboarding/uploads/{session_id}/validate").json()
+    assert cleaned["can_commit"] is True, cleaned["blocking"]
+
+
+async def test_a_third_differently_structured_file_imports(scoped: TestClient) -> None:
+    """The milestone's exit criterion, run end to end as a reviewer would.
+
+    Three files of unrelated shapes — a clean IPS export, a receptionist's
+    hand-kept workbook, and a Spanish Excel CSV with cp1252 and semicolons —
+    each reach a committed import. The middle one takes two corrections, which
+    is what "minor mapping confirmation" means.
+    """
+    committed = {}
+    for name in ("1_clean_ips.xlsx", "3_excel_csv_es.csv"):
+        body = _upload(scoped, name)
+        scoped.post(f"/onboarding/uploads/{body['session_id']}/validate")
+        response = scoped.post(f"/onboarding/uploads/{body['session_id']}/commit")
+        assert response.status_code == 200, response.text
+        committed[name] = sum(response.json()["committed"].values())
+
+    body = _upload(scoped, "2_receptionist.xlsx")
+    session_id = body["session_id"]
+    scoped.put(
+        f"/onboarding/uploads/{session_id}/mapping",
+        json={"sheet": "AGOSTO (viejo)", "mapping": {}, "entity": "skip"},
+    )
+    scoped.put(
+        f"/onboarding/uploads/{session_id}/mapping",
+        json={
+            "sheet": "AGENDA",
+            "mapping": {},
+            "entity": "patient",
+            "excluded_rows": [17, 18, 19, 20],
+        },
+    )
+    scoped.post(f"/onboarding/uploads/{session_id}/validate")
+    response = scoped.post(f"/onboarding/uploads/{session_id}/commit")
+    assert response.status_code == 200, response.text
+    committed["2_receptionist.xlsx"] = response.json()["committed"]["AGENDA"]
+
+    assert all(count > 0 for count in committed.values()), committed
+
+
+async def test_the_messy_workbook_is_fixed_entirely_from_the_screen(
+    scoped: TestClient,
+) -> None:
+    """The same two corrections, made the way a receptionist would make them.
+
+    The API having a control is not the same as a person being able to reach it,
+    and this screen is the milestone's "mapping confirmation" deliverable. The
+    row numbers are typed the way a person types them, commas and all.
+    """
+    body = _upload(scoped, "2_receptionist.xlsx")
+    session_id = body["session_id"]
+
+    scoped.post(
+        f"/onboarding/uploads/{session_id}/review/AGOSTO (viejo)",
+        data={"entity": "skip"},
+        follow_redirects=False,
+    )
+    scoped.post(
+        f"/onboarding/uploads/{session_id}/review/AGENDA",
+        data={"entity": "patient", "exclude": "17, 18, 19 y 20"},
+        follow_redirects=False,
+    )
+    scoped.post(f"/onboarding/uploads/{session_id}/review/validate", follow_redirects=False)
+
+    page = scoped.get(f"/onboarding/uploads/{session_id}/review").text
+    assert "cannot be committed yet" not in page
+
+    scoped.post(f"/onboarding/uploads/{session_id}/review/commit", follow_redirects=False)
+    final = scoped.get(f"/onboarding/uploads/{session_id}").json()
+    assert final["status"] == "committed"

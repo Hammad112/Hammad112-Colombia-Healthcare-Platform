@@ -176,7 +176,21 @@ class MappingIn(BaseModel):
 
     sheet: str
     mapping: dict[str, str | None]
+    entity: str | None = Field(
+        default=None,
+        description="What this sheet holds: patient, doctor, specialty, availability "
+        "or appointment. A sheet called AGENDA carrying patient columns is genuinely "
+        "ambiguous, so the reviewer decides rather than the matcher guessing harder. "
+        "Send 'skip' to leave the sheet out of the import entirely, which is how a "
+        "stale sheet left in the workbook is dealt with.",
+    )
     decisions: dict[str, str] = Field(
         default_factory=dict,
         description="Answers to the sheet's questions, e.g. {'FECHA': 'day_first'}.",
+    )
+    excluded_rows: list[int] = Field(
+        default_factory=list,
+        description="Rows in the file that are not records at all: a TOTAL line, a "
+        "heading for a second table pasted below the first, a note to staff. They "
+        "are left out of the import rather than reported as broken patients.",
     )

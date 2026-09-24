@@ -22,12 +22,14 @@ from __future__ import annotations
 
 import contextlib
 import html
+import re
 import uuid
 
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from src.api.dependencies import ClinicScopeDep, SessionDep
+from src.api.onboarding.routes import SKIP_SHEET
 from src.onboarding import repository, service
 from src.onboarding.canonical import FIELDS_BY_ENTITY, Entity
 
@@ -144,6 +146,11 @@ def _sheet_section(report: service.SheetReport, session_id: uuid.UUID, clinic_id
         else f"{report.total_rows} rows"
     )
 
+    kinds = "".join(
+        f'<option value="{e.value}"{" selected" if e is report.entity else ""}>{e.value}</option>'
+        for e in Entity
+    )
+
     return f"""
     <h2>{_escape(report.sheet)}</h2>
     <p class="sub">Read as <strong>{_escape(report.entity.value)}</strong> —
@@ -151,6 +158,14 @@ def _sheet_section(report: service.SheetReport, session_id: uuid.UUID, clinic_id
     {"".join(blocks)}
     <form method="post"
           action="/onboarding/uploads/{session_id}/review/{_escape(report.sheet)}?clinic_id={clinic_id}">
+      <p class="note">
+        This sheet holds
+        <select name="entity" style="width:auto">{kinds}
+          <option value="{SKIP_SHEET}">— do not import this sheet —</option>
+        </select>
+        · rows to leave out (numbers as the file shows them, e.g. a total line):
+        <input name="exclude" placeholder="17, 18, 19" style="width:12em;padding:5px">
+      </p>
       <table>
         <tr><th>Column in the file</th><th>Import as</th><th>Valid</th><th>Why</th></tr>
         {rows}
@@ -295,8 +310,22 @@ async def review_save_mapping(
         elif key.startswith("ask::") and text:
             decisions[key[5:]] = text
 
+    entity = str(form.get("entity") or "").strip() or None
+    # Typed by a person, so anything that is not a row number is dropped rather
+    # than rejected: "17, 18 y 19" should not lose the whole submission.
+    excluded = [int(p) for p in re.split(r"[^0-9]+", str(form.get("exclude") or "")) if p]
+
     await set_mapping(
-        db, session_id, scope, MappingIn(sheet=sheet, mapping=mapping, decisions=decisions)
+        db,
+        session_id,
+        scope,
+        MappingIn(
+            sheet=sheet,
+            mapping=mapping,
+            decisions=decisions,
+            entity=entity,
+            excluded_rows=excluded,
+        ),
     )
     return RedirectResponse(
         f"/onboarding/uploads/{session_id}/review?clinic_id={scope.clinic_id}",
