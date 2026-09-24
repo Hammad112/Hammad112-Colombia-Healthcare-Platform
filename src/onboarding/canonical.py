@@ -102,7 +102,9 @@ _PATIENT: Final = (
             "identification",
         ),
         normalizer="document_number",
-        examples=("1045678901", "71234567"),
+        # Deliberately not a plausible cédula: these are shown to a reviewer
+        # and sent to a model, so they must be recognisable as ours.
+        examples=("0000000001", "0000000002"),
     ),
     Field(
         "full_name",
@@ -121,7 +123,7 @@ _PATIENT: Final = (
             "nombre paciente",
         ),
         normalizer="full_name",
-        examples=("Carlos Andrés Pérez Gómez",),
+        examples=("Nombre Segundo Apellido Apellido",),
     ),
     Field(
         "given_names",
@@ -174,7 +176,7 @@ _PATIENT: Final = (
             "fdn",
         ),
         normalizer="date",
-        examples=("1985-03-12", "12/03/1985"),
+        examples=("1990-01-01", "01/01/1990"),
     ),
     Field(
         "phone_e164",
@@ -194,7 +196,7 @@ _PATIENT: Final = (
             "cellphone",
         ),
         normalizer="phone",
-        examples=("3001234567", "+573001234567"),
+        examples=("3000000000", "+573000000000"),
     ),
     Field(
         "phone_fixed",
@@ -203,7 +205,7 @@ _PATIENT: Final = (
         "A landline. Colombian landlines have 10 digits starting 60.",
         aliases=("telefono", "tel", "telefono fijo", "fijo", "phone", "landline", "telefono casa"),
         normalizer="phone",
-        examples=("6012345678",),
+        examples=("6010000000",),
     ),
     Field(
         "email",
@@ -211,7 +213,7 @@ _PATIENT: Final = (
         Requirement.OPTIONAL,
         "Email address.",
         aliases=("correo", "correo electronico", "email", "e-mail", "mail", "correo del paciente"),
-        examples=("paciente@example.com",),
+        examples=("correo@ejemplo.invalid",),
     ),
     Field(
         "eps",

@@ -23,8 +23,15 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.core.config import get_settings
 from src.onboarding import normalizers as norm
-from src.onboarding.canonical import Entity, Field, field_for, required_fields
+from src.onboarding.canonical import (
+    FIELDS_BY_ENTITY,
+    Entity,
+    Field,
+    field_for,
+    required_fields,
+)
 from src.onboarding.matcher import Proposal, SheetMapping, guess_entity, match_sheet
 from src.onboarding.reader import ReadResult, Sheet
 
@@ -112,15 +119,77 @@ def analyse(result: ReadResult) -> tuple[SheetReport, ...]:
     return tuple(_analyse_sheet(sheet) for sheet in result.sheets)
 
 
+def _ask_model(sheet: Sheet, entity: Entity, mapping: SheetMapping) -> dict[str, ColumnReport]:
+    """Ask a model about the columns the deterministic stages could not resolve.
+
+    The PDF's scope includes an LLM-assisted mapping proposal, and the
+    architecture places it as a re-ranker over deterministic candidates rather
+    than as the mapper. So this runs last, over the residue, and only when a key
+    is configured: an ordinary Spanish export reaches it with nothing to ask.
+
+    A failure here is not an error. The column keeps whatever the deterministic
+    stages thought and goes to the person confirming the import, which is
+    exactly where it would have gone with no provider at all.
+    """
+    from src.onboarding import llm
+
+    settings = get_settings()
+    if not settings.mapping_llm_available:
+        return {}
+
+    unresolved = [p for p in mapping.proposals if not p.auto]
+    if not unresolved:
+        return {}
+
+    taken = {p.field.name for p in mapping.proposals if p.auto and p.field}
+    candidates = tuple(f.name for f in FIELDS_BY_ENTITY[entity] if f.name not in taken)
+    index = {header: position for position, header in enumerate(sheet.headers)}
+    improved: dict[str, ColumnReport] = {}
+
+    for proposal in unresolved:
+        values = [row[index[proposal.column]] for row in sheet.rows]
+        profile = llm.profile_column(values)
+        question = llm.ColumnQuestion(
+            header=proposal.column,
+            shape=profile.shape,
+            filled_percent=profile.filled_percent,
+            distinct_count=profile.distinct_count,
+            synthetic_examples=profile.examples,
+        )
+        try:
+            suggestion = llm.suggest(question, entity, candidates=candidates)
+        except llm.LLMUnavailable:
+            continue  # the human decides, as they would have anyway
+        if suggestion.target_field is None or suggestion.target_field in taken:
+            continue
+        taken.add(suggestion.target_field)
+        improved[proposal.column] = ColumnReport(
+            column=proposal.column,
+            target_field=suggestion.target_field,
+            # Never pre-ticked. A model's answer is a suggestion for a person to
+            # confirm, not a decision: schema adherence is not correctness.
+            confidence="suggested",
+            reason=f"{suggestion.provider} suggests this: {suggestion.reason}",
+            auto=False,
+        )
+    return improved
+
+
+def analyse_sheet_for_test(sheet: Sheet) -> SheetReport:
+    """Analyse one sheet. Exposed for tests that build a sheet directly."""
+    return _analyse_sheet(sheet)
+
+
 def _analyse_sheet(sheet: Sheet) -> SheetReport:
     entity, reason = guess_entity(sheet.name, sheet.headers)
     mapping = match_sheet(sheet.headers, entity)
     questions = _column_questions(sheet, mapping)
+    suggested = _ask_model(sheet, entity, mapping)
     return SheetReport(
         sheet=sheet.name,
         entity=entity,
         entity_reason=reason,
-        columns=tuple(_column_report(p) for p in mapping.proposals),
+        columns=tuple(suggested.get(p.column) or _column_report(p) for p in mapping.proposals),
         missing_required=mapping.missing_required,
         total_rows=len(sheet.rows),
         valid_rows=0,
