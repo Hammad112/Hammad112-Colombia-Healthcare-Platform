@@ -16,6 +16,7 @@ from src.api.middleware import (
     SecurityHeadersMiddleware,
     UnhandledErrorMiddleware,
 )
+from src.api.onboarding import router as onboarding_router
 from src.api.review import router as review_router
 from src.audit.service import anchor_chain
 from src.core.config import get_settings
@@ -85,4 +86,5 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(review_router)
+    app.include_router(onboarding_router)
     return app
