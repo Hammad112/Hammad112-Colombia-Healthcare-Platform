@@ -33,6 +33,7 @@ from src.api.dependencies import ClinicScopeDep, SessionDep
 from src.api.onboarding.schemas import (
     CellOut,
     CommitOut,
+    CorrectionIn,
     MappingIn,
     ProfileOut,
     RowOut,
@@ -98,6 +99,12 @@ def _decisions_of(record: Any, sheet: str) -> dict[str, str]:
 
 def _excluded_of(record: Any, sheet: str) -> set[int]:
     return set((record.report or {}).get("excluded", {}).get(sheet, []))
+
+
+def _corrections_of(record: Any, sheet: str) -> dict[int, dict[str, str]]:
+    """Cells a reviewer has answered, keyed by row number then column."""
+    stored = (record.report or {}).get("corrections", {}).get(sheet, {})
+    return {int(row): dict(cells) for row, cells in stored.items()}
 
 
 #: Sent as a sheet's `entity` to leave it out of the import entirely.
@@ -318,6 +325,68 @@ async def set_mapping(
 
 
 @router.post(
+    "/uploads/{session_id}/rows/correct",
+    response_model=UploadOut,
+    summary="Answer a row the file could not decide for itself",
+)
+async def correct_row(
+    db: SessionDep, session_id: uuid.UUID, scope: ClinicScopeDep, body: CorrectionIn
+) -> UploadOut:
+    """Record a reviewer's answer for one row, then revalidate.
+
+    Some rows cannot be decided from the file at all: a three-word Colombian
+    name splits two ways and Ley 2129 de 2021 lets parents choose the order, so
+    no positional rule settles it. Refusing such a row is right, but a refusal
+    a reviewer cannot answer is a dead end — the row would simply never import.
+
+    The answer supplies the cell's **text** and is stored against the session,
+    not written into the staged row: `validate` applies it before conversion, so
+    the corrected value runs through the same normalizer as every other cell on
+    every revalidation. A correction that is itself invalid is caught exactly
+    like an original value, and the transform log still shows the rule that
+    produced the cell.
+    """
+    record, parsed = await _load(db, session_id, scope.clinic_id)
+    if record.status == "committed":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This import was already committed.")
+
+    sheet = next((s for s in parsed.sheets if s.name == body.sheet), None)
+    if sheet is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No sheet named {body.sheet!r}.")
+
+    unknown = set(body.cells) - set(sheet.headers)
+    if unknown:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"These columns are not in the sheet: {sorted(unknown)}.",
+        )
+
+    last_row = sheet.header_row + len(sheet.rows)
+    if not sheet.header_row < body.row_number <= last_row:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"Row {body.row_number} is not a data row; this sheet holds rows "
+            f"{sheet.header_row + 1} to {last_row}.",
+        )
+
+    stored = dict(record.report or {})
+    corrections = dict(stored.get("corrections", {}))
+    for_sheet = dict(corrections.get(body.sheet, {}))
+    # Merged per row, so answering a second column does not undo the first.
+    row_cells = dict(for_sheet.get(str(body.row_number), {}))
+    row_cells.update(body.cells)
+    for_sheet[str(body.row_number)] = row_cells
+    corrections[body.sheet] = for_sheet
+    _store_reports(record, _reports(record), corrections=corrections)
+    await db.flush()
+
+    # Revalidated here rather than left to the caller: a correction that does
+    # not change the row's status is a correction the reviewer needs to see.
+    await validate(db, session_id, scope)
+    return await get_upload(db, session_id, scope)
+
+
+@router.post(
     "/uploads/{session_id}/validate",
     response_model=ValidationOut,
     summary="Run every rule over every row and stage the results",
@@ -350,6 +419,7 @@ async def validate(db: SessionDep, session_id: uuid.UUID, scope: ClinicScopeDep)
             mapping,
             decisions=_decisions_of(record, report.sheet),
             excluded_rows=_excluded_of(record, report.sheet),
+            corrections=_corrections_of(record, report.sheet),
         )
         await repository.replace_staging(
             db,
@@ -537,6 +607,7 @@ async def commit(
             mapping,
             decisions=_decisions_of(record, report.sheet),
             excluded_rows=_excluded_of(record, report.sheet),
+            corrections=_corrections_of(record, report.sheet),
         )
         applied = await repository.apply_rows(
             db, clinic_id=scope.clinic_id, entity=report.entity, rows=rows

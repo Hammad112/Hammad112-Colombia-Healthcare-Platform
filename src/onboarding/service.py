@@ -270,11 +270,18 @@ def validate(
     *,
     decisions: ColumnDecisions | None = None,
     excluded_rows: set[int] | None = None,
+    corrections: dict[int, dict[str, str]] | None = None,
 ) -> tuple[list[RowResult], tuple[ColumnReport, ...]]:
     """Run every normalizer over every row of one sheet.
 
     `mapping` is what the human confirmed: column name to canonical field name,
     or None for a column that is deliberately not imported.
+
+    `corrections` replaces a cell's text before conversion, keyed by row number
+    then column. A reviewer answering "which of these three words is the
+    surname?" supplies the value; it is still converted by the same normalizer
+    as every other cell, so a corrected value that is itself invalid is caught
+    exactly like an original one.
     """
     decisions = decisions or {}
     index = {header: position for position, header in enumerate(sheet.headers)}
@@ -303,10 +310,11 @@ def validate(
         # broken patient, which would block the import for no reason.
         if offset in excluded:
             continue
+        corrected = (corrections or {}).get(offset, {})
         row = RowResult(
             row_number=offset,
             entity=entity,
-            raw={header: raw_row[index[header]] for header in sheet.headers},
+            raw={header: corrected.get(header, raw_row[index[header]]) for header in sheet.headers},
         )
         for column, target in mapping.items():
             if target is None:
@@ -314,7 +322,9 @@ def validate(
             canonical = field_for(entity, target)
             if canonical is None:
                 continue
-            raw_value = raw_row[index[column]]
+            # The reviewer's answer, where they gave one, so the correction is
+            # what gets converted rather than only what gets displayed.
+            raw_value = corrected.get(column, raw_row[index[column]])
             outcome = _apply(canonical, raw_value, orders.get(column, norm.DayFirst.UNDECIDED))
             counts[column][outcome.status.value] += 1
             row.cells.append(

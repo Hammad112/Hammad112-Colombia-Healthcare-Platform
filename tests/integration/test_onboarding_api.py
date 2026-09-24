@@ -712,3 +712,162 @@ async def test_the_messy_workbook_is_fixed_entirely_from_the_screen(
     scoped.post(f"/onboarding/uploads/{session_id}/review/commit", follow_redirects=False)
     final = scoped.get(f"/onboarding/uploads/{session_id}").json()
     assert final["status"] == "committed"
+
+
+async def test_a_reviewer_can_answer_a_row_the_file_cannot_decide(
+    scoped: TestClient,
+) -> None:
+    """The last step of the workflow: a refusal a person can actually resolve.
+
+    Three of AGENDA's rows are correctly refused — two unassigned phone
+    prefixes and a three-word name that splits two ways. Refusing is right, but
+    without this endpoint those rows could never import, and "correct refusal"
+    would just mean "permanently stuck".
+    """
+    body = _upload(scoped, "2_receptionist.xlsx")
+    session_id = body["session_id"]
+    scoped.put(
+        f"/onboarding/uploads/{session_id}/mapping",
+        json={"sheet": "AGOSTO (viejo)", "mapping": {}, "entity": "skip"},
+    )
+    scoped.put(
+        f"/onboarding/uploads/{session_id}/mapping",
+        json={
+            "sheet": "AGENDA",
+            "mapping": {},
+            "entity": "patient",
+            "excluded_rows": [17, 18, 19, 20],
+        },
+    )
+    scoped.post(f"/onboarding/uploads/{session_id}/validate")
+
+    review = scoped.get(
+        f"/onboarding/uploads/{session_id}/rows", params={"status": "review"}
+    ).json()
+    assert len(review) == 3
+
+    for row in review:
+        cells = {}
+        for reason in row["reviews"]:
+            if reason.startswith("CELULAR"):
+                cells["CELULAR"] = "3101234567"  # a reachable prefix
+            elif reason.startswith("NOMBRE COMPLETO"):
+                cells["NOMBRE COMPLETO"] = "Zzyzx Sentinelensen Marcadorez Prueba"
+        response = scoped.post(
+            f"/onboarding/uploads/{session_id}/rows/correct",
+            json={"sheet": "AGENDA", "row_number": row["row_number"], "cells": cells},
+        )
+        assert response.status_code == 200, response.text
+
+    still_open = scoped.get(
+        f"/onboarding/uploads/{session_id}/rows", params={"status": "review"}
+    ).json()
+    assert still_open == []
+
+    committed = scoped.post(f"/onboarding/uploads/{session_id}/commit")
+    assert committed.status_code == 200, committed.text
+    assert committed.json()["committed"]["AGENDA"] == 11
+    assert committed.json()["skipped"]["AGENDA"] == 0
+
+
+async def test_a_correction_is_converted_by_the_same_rules(scoped: TestClient) -> None:
+    """A reviewer supplies text, not a verdict.
+
+    If a correction were trusted as given, this endpoint would be a hole
+    straight through the normalizers: a person could answer a refused phone
+    with anything at all. The corrected value is converted like every other
+    cell, so an unreachable number is refused a second time.
+    """
+    body = _upload(scoped, "2_receptionist.xlsx")
+    session_id = body["session_id"]
+    scoped.put(
+        f"/onboarding/uploads/{session_id}/mapping",
+        json={"sheet": "AGOSTO (viejo)", "mapping": {}, "entity": "skip"},
+    )
+    scoped.put(
+        f"/onboarding/uploads/{session_id}/mapping",
+        json={
+            "sheet": "AGENDA",
+            "mapping": {},
+            "entity": "patient",
+            "excluded_rows": [17, 18, 19, 20],
+        },
+    )
+    scoped.post(f"/onboarding/uploads/{session_id}/validate")
+
+    phone_row = next(
+        r
+        for r in scoped.get(
+            f"/onboarding/uploads/{session_id}/rows", params={"status": "review"}
+        ).json()
+        if any(reason.startswith("CELULAR") for reason in r["reviews"])
+    )
+    scoped.post(
+        f"/onboarding/uploads/{session_id}/rows/correct",
+        json={
+            "sheet": "AGENDA",
+            "row_number": phone_row["row_number"],
+            "cells": {"CELULAR": "3067891235"},  # still an unassigned prefix
+        },
+    )
+
+    after = scoped.get(f"/onboarding/uploads/{session_id}/rows", params={"status": "review"}).json()
+    assert any(r["row_number"] == phone_row["row_number"] for r in after)
+
+
+async def test_a_correction_to_a_row_that_does_not_exist_is_refused(
+    scoped: TestClient,
+) -> None:
+    body = _upload(scoped, "1_clean_ips.xlsx")
+    response = scoped.post(
+        f"/onboarding/uploads/{body['session_id']}/rows/correct",
+        json={"sheet": "Pacientes", "row_number": 9999, "cells": {"Celular": "3101234567"}},
+    )
+    assert response.status_code == 422
+
+
+async def test_a_refused_row_can_be_answered_from_the_screen(scoped: TestClient) -> None:
+    """The correction step has to exist where a receptionist actually works.
+
+    The screen reported a count of rows to review without ever showing them, so
+    the only way to resolve one was the API. This covers the rendered form and
+    its handler together.
+    """
+    body = _upload(scoped, "2_receptionist.xlsx")
+    session_id = body["session_id"]
+    scoped.post(
+        f"/onboarding/uploads/{session_id}/review/AGOSTO (viejo)",
+        data={"entity": "skip"},
+        follow_redirects=False,
+    )
+    scoped.post(
+        f"/onboarding/uploads/{session_id}/review/AGENDA",
+        data={"entity": "patient", "exclude": "17, 18, 19 y 20"},
+        follow_redirects=False,
+    )
+    scoped.post(f"/onboarding/uploads/{session_id}/review/validate", follow_redirects=False)
+
+    page = scoped.get(f"/onboarding/uploads/{session_id}/review").text
+    assert "Rows needing an answer" in page
+    assert "cannot be reached" in page
+
+    rows = scoped.get(f"/onboarding/uploads/{session_id}/rows", params={"status": "review"}).json()
+    for row in rows:
+        data = {"sheet": "AGENDA"}
+        for reason in row["reviews"]:
+            if reason.startswith("CELULAR"):
+                data["cell::CELULAR"] = "3101234567"
+            elif reason.startswith("NOMBRE COMPLETO"):
+                data["cell::NOMBRE COMPLETO"] = "Zzyzx Sentinelensen Marcadorez Prueba"
+        scoped.post(
+            f"/onboarding/uploads/{session_id}/review/rows/{row['row_number']}",
+            data=data,
+            follow_redirects=False,
+        )
+
+    page = scoped.get(f"/onboarding/uploads/{session_id}/review").text
+    assert "Rows needing an answer" not in page
+
+    scoped.post(f"/onboarding/uploads/{session_id}/review/commit", follow_redirects=False)
+    final = scoped.get(f"/onboarding/uploads/{session_id}").json()
+    assert final["status"] == "committed"

@@ -24,6 +24,7 @@ import contextlib
 import html
 import re
 import uuid
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -175,6 +176,76 @@ def _sheet_section(report: service.SheetReport, session_id: uuid.UUID, clinic_id
     """
 
 
+def _review_rows(rows: list[Any], session_id: uuid.UUID, clinic_id: uuid.UUID) -> str:
+    """The rows the file could not decide, each with the cell to answer.
+
+    Refusing these rows is correct, but a refusal nobody can answer means the
+    patient never imports. The reviewer types the cell's value; it is converted
+    by the same normalizer as every other cell.
+    """
+    if not rows:
+        return ""
+
+    blocks = []
+    for row in rows:
+        # Stored as JSON on the row, the same shape the rows endpoint returns.
+        review_reasons = list((row.errors or {}).get("reviews", []))
+        reasons = "".join(f"<li>{_escape(r)}</li>" for r in review_reasons)
+        # The column each reason names, so the reviewer answers that cell.
+        columns = [r.split(":")[0] for r in review_reasons if ":" in r]
+        inputs = "".join(
+            f'<label class="note">{_escape(column)}: '
+            f'<input name="cell::{_escape(column)}" style="width:18em;padding:5px">'
+            "</label><br>"
+            for column in dict.fromkeys(columns)
+        )
+        blocks.append(
+            f'<div class="card warn">'
+            f"<strong>Row {row.row_number}</strong><ul>{reasons}</ul>"
+            f'<form method="post" action="/onboarding/uploads/{session_id}'
+            f'/review/rows/{row.row_number}?clinic_id={clinic_id}">'
+            f'<input type="hidden" name="sheet" value="{_escape(row.sheet)}">'
+            f"{inputs}"
+            '<p><button class="secondary" type="submit">Save this row</button></p>'
+            "</form></div>"
+        )
+    return (
+        '<h2>Rows needing an answer</h2><p class="sub">These rows will not be '
+        "imported until they are answered. What you type is converted by the same "
+        "rules as the rest of the file.</p>" + "".join(blocks)
+    )
+
+
+@router.post("/uploads/{session_id}/review/rows/{row_number}", include_in_schema=False)
+async def review_correct_row(
+    db: SessionDep,
+    session_id: uuid.UUID,
+    row_number: int,
+    scope: ClinicScopeDep,
+    request: Request,
+) -> RedirectResponse:
+    from src.api.onboarding.routes import correct_row
+    from src.api.onboarding.schemas import CorrectionIn
+
+    form = await request.form()
+    cells = {
+        key[6:]: str(value).strip()
+        for key, value in form.multi_items()
+        if key.startswith("cell::") and str(value).strip()
+    }
+    if cells:
+        await correct_row(
+            db,
+            session_id,
+            scope,
+            CorrectionIn(sheet=str(form.get("sheet") or ""), row_number=row_number, cells=cells),
+        )
+    return RedirectResponse(
+        f"/onboarding/uploads/{session_id}/review?clinic_id={scope.clinic_id}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
 @router.get(
     "/uploads/{session_id}/review",
     response_class=HTMLResponse,
@@ -191,6 +262,17 @@ async def review_screen(
     stored = record.report or {}
     reports = [service.report_from_dict(s) for s in stored.get("sheets", [])]
     sections = "".join(_sheet_section(r, session_id, scope.clinic_id) for r in reports)
+    needing_answers = _review_rows(
+        await repository.staged_rows(
+            db,
+            clinic_id=scope.clinic_id,
+            session_id=session_id,
+            status="review",
+            limit=50,
+        ),
+        session_id,
+        scope.clinic_id,
+    )
 
     blocking = stored.get("blocking", [])
     if blocking:
@@ -238,6 +320,7 @@ async def review_screen(
      <strong>{_escape(record.status)}</strong></p>
   {duplicate}{banner}{reused_note}
   {sections}
+  {needing_answers}
   <h2>When the mapping is right</h2>
   <form method="post" action="/onboarding/uploads/{session_id}/review/validate{query}"
         style="display:inline">

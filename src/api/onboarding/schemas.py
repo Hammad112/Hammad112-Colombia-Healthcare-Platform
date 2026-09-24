@@ -171,6 +171,22 @@ class ProfileOut(BaseModel):
     updated_at: datetime
 
 
+class CorrectionIn(BaseModel):
+    """One reviewer's answer to one row the file could not decide.
+
+    The correction supplies the cell's text, not its converted value: it goes
+    through the same normalizer as every other cell, so answering "Pérez Gómez
+    is the surname" cannot introduce a value the rules would have rejected.
+    """
+
+    sheet: str
+    row_number: int = Field(description="The row number as the file shows it.")
+    cells: dict[str, str] = Field(
+        description="Column name to the corrected text for that cell.",
+        min_length=1,
+    )
+
+
 class MappingIn(BaseModel):
     """A reviewer's corrections: column heading to canonical field, or null to skip."""
 
