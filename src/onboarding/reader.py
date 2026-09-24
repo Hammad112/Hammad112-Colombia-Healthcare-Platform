@@ -5,7 +5,7 @@ Three rules govern this module:
 **Nothing is inferred.** Values are read as text exactly as stored. Type
 inference is what silently turns a cédula into a float and a Colombian date into
 an American one, so conversion happens later, in `normalizers`, driven by the
-mapping a human confirmed. CLAUDE.md §10 names inferring transforms from sampled
+mapping a human confirmed. CLAUDE.md §11 names inferring transforms from sampled
 rows as the failure that sank the client's previous project.
 
 **Refusal beats a guess.** Where a file is genuinely ambiguous, the reader
