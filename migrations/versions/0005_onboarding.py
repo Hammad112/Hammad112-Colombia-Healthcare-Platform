@@ -290,6 +290,9 @@ def upgrade() -> None:
         sa.Column("column_name", sa.String(255), nullable=False),
         sa.Column("target_field", sa.String(80), nullable=True),
         sa.Column("raw_value", sa.Text(), nullable=True),
+        # What a reviewer supplied in place of raw_value. Null unless a person
+        # answered this cell, so the log keeps showing what the file held.
+        sa.Column("corrected_from_review", sa.Text(), nullable=True),
         sa.Column("normalized_value", sa.Text(), nullable=True),
         sa.Column("rule", sa.String(80), nullable=False),
         sa.Column("status", sa.String(20), nullable=False),

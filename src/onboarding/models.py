@@ -141,7 +141,12 @@ class TransformLogEntry(Base):
     row_number: Mapped[int] = mapped_column(Integer)
     column_name: Mapped[str] = mapped_column(String(255))
     target_field: Mapped[str | None] = mapped_column(String(80))
+    #: What the file held. A reviewer's answer never overwrites it.
     raw_value: Mapped[str | None] = mapped_column(Text)
+    #: What a reviewer supplied instead, when they answered this cell. Null
+    #: otherwise, so a corrected value is always distinguishable from an
+    #: exported one.
+    corrected_from_review: Mapped[str | None] = mapped_column(Text)
     normalized_value: Mapped[str | None] = mapped_column(Text)
     rule: Mapped[str] = mapped_column(String(80))
     status: Mapped[str] = mapped_column(String(20))

@@ -871,3 +871,77 @@ async def test_a_refused_row_can_be_answered_from_the_screen(scoped: TestClient)
     scoped.post(f"/onboarding/uploads/{session_id}/review/commit", follow_redirects=False)
     final = scoped.get(f"/onboarding/uploads/{session_id}").json()
     assert final["status"] == "committed"
+
+
+async def test_a_correction_never_overwrites_what_the_file_held(
+    scoped: TestClient,
+) -> None:
+    """The transform log must keep saying what the clinic actually exported.
+
+    In-flight editing is not the audit problem; editing *silently* is. HL7
+    Provenance expects a changed value to name who changed it, and DAMA-DMBOK
+    treats downstream correction as acceptable only when the original stays
+    recoverable. An earlier version of the correction path replaced the cell
+    before conversion, so the log claimed the file had contained the reviewer's
+    value and the exported one was gone.
+    """
+    body = _upload(scoped, "2_receptionist.xlsx")
+    session_id = body["session_id"]
+    scoped.put(
+        f"/onboarding/uploads/{session_id}/mapping",
+        json={"sheet": "AGOSTO (viejo)", "mapping": {}, "entity": "skip"},
+    )
+    scoped.put(
+        f"/onboarding/uploads/{session_id}/mapping",
+        json={
+            "sheet": "AGENDA",
+            "mapping": {},
+            "entity": "patient",
+            "excluded_rows": [17, 18, 19, 20],
+        },
+    )
+    scoped.post(f"/onboarding/uploads/{session_id}/validate")
+
+    row = next(
+        r
+        for r in scoped.get(
+            f"/onboarding/uploads/{session_id}/rows", params={"status": "review"}
+        ).json()
+        if any(reason.startswith("CELULAR") for reason in r["reviews"])
+    )
+    exported = next(
+        entry
+        for entry in scoped.get(f"/onboarding/uploads/{session_id}/transform-log").json()
+        if entry["row_number"] == row["row_number"] and entry["column"] == "CELULAR"
+    )["raw"]
+
+    scoped.post(
+        f"/onboarding/uploads/{session_id}/rows/correct",
+        json={
+            "sheet": "AGENDA",
+            "row_number": row["row_number"],
+            "cells": {"CELULAR": "3101234567"},
+        },
+    )
+
+    entry = next(
+        e
+        for e in scoped.get(f"/onboarding/uploads/{session_id}/transform-log").json()
+        if e["row_number"] == row["row_number"] and e["column"] == "CELULAR"
+    )
+    # What the file held survives the correction, ...
+    assert entry["raw"] == exported
+    # ... the reviewer's answer is recorded as theirs, ...
+    assert entry["corrected_from_review"] == "3101234567"
+    # ... and the value that will be written came from the normalizer.
+    assert entry["normalized"] == "+573101234567"
+    assert entry["status"] == "valid"
+
+
+async def test_an_untouched_cell_is_not_marked_as_corrected(scoped: TestClient) -> None:
+    """Only an answered cell carries an answer, or the field means nothing."""
+    body = _upload(scoped, "1_clean_ips.xlsx")
+    scoped.post(f"/onboarding/uploads/{body['session_id']}/validate")
+    entries = scoped.get(f"/onboarding/uploads/{body['session_id']}/transform-log").json()
+    assert entries
+    assert all(e["corrected_from_review"] is None for e in entries)

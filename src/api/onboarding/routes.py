@@ -542,6 +542,7 @@ async def transform_log(
             column=e.column_name,
             target_field=e.target_field,
             raw=e.raw_value or "",
+            corrected_from_review=e.corrected_from_review,
             normalized=e.normalized_value,
             rule=e.rule,
             status=e.status,

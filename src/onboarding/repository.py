@@ -164,6 +164,7 @@ async def replace_staging(
                     column_name=cell.column,
                     target_field=cell.target_field,
                     raw_value=cell.raw,
+                    corrected_from_review=cell.corrected_from_review,
                     normalized_value=cell.normalized,
                     rule=cell.rule,
                     status=cell.status.value,

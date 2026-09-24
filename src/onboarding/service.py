@@ -47,11 +47,17 @@ class CellResult:
     row_number: int
     column: str
     target_field: str | None
+    #: What the **file** held. A reviewer's answer never overwrites this: the
+    #: log has to keep showing what arrived, or it stops being evidence.
     raw: str
     normalized: str | None
     rule: str
     status: norm.Status
     message: str = ""
+    #: What a reviewer supplied in place of `raw`, when they answered this cell.
+    #: Present only on a corrected cell, so the log distinguishes a value the
+    #: clinic exported from one a person decided.
+    corrected_from_review: str | None = None
 
 
 @dataclass(slots=True)
@@ -324,7 +330,11 @@ def validate(
                 continue
             # The reviewer's answer, where they gave one, so the correction is
             # what gets converted rather than only what gets displayed.
-            raw_value = corrected.get(column, raw_row[index[column]])
+            original = raw_row[index[column]]
+            # The reviewer's answer, where they gave one, so the correction is
+            # what gets converted rather than only what gets displayed.
+            answer = corrected.get(column)
+            raw_value = original if answer is None else answer
             outcome = _apply(canonical, raw_value, orders.get(column, norm.DayFirst.UNDECIDED))
             counts[column][outcome.status.value] += 1
             row.cells.append(
@@ -332,11 +342,12 @@ def validate(
                     row_number=offset,
                     column=column,
                     target_field=target,
-                    raw=raw_value,
+                    raw=original,
                     normalized=_text(outcome.value),
                     rule=outcome.rule,
                     status=outcome.status,
                     message=outcome.message,
+                    corrected_from_review=answer,
                 )
             )
             if outcome.status is norm.Status.VALID:

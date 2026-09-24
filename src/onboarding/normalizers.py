@@ -220,6 +220,12 @@ def phone(raw: str, *, region: str = "CO") -> Outcome[str]:
     except phonenumbers.NumberParseException as error:
         return _review("phone.unparseable", f"{raw!r} is not a phone number ({error}).")
 
+    # Which mobile prefixes exist is libphonenumber's metadata, not ours: its CO
+    # pattern currently admits 300-305 and 310-319 but not 306-309. If real
+    # clinic files start producing a cluster of rejections in one prefix, that
+    # is evidence the metadata is stale, and the fix is upgrading the
+    # `phonenumbers` package, which is where the metadata ships. Never widen a
+    # pattern by hand here: a prefix we invent sends reminders into the void.
     if not phonenumbers.is_valid_number(parsed):
         return _review(
             "phone.not_assigned",

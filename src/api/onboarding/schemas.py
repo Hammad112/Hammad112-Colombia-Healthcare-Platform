@@ -113,7 +113,11 @@ class CellOut(BaseModel):
     row_number: int
     column: str
     target_field: str | None
-    raw: str
+    raw: str = Field(description="What the file held, never a reviewer's answer.")
+    corrected_from_review: str | None = Field(
+        default=None,
+        description="What a reviewer supplied in place of `raw`, if they answered this cell.",
+    )
     normalized: str | None
     rule: str = Field(description="The named rule that produced this result.")
     status: str
