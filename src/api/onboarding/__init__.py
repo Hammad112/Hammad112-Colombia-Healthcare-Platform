@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from src.api.onboarding import routes
+from src.api.onboarding import review, routes
 from src.api.review.access import require_synthetic_review
 
 router = APIRouter(
@@ -19,5 +19,6 @@ router = APIRouter(
     dependencies=[Depends(require_synthetic_review)],
 )
 router.include_router(routes.router)
+router.include_router(review.router)
 
 __all__ = ["router"]

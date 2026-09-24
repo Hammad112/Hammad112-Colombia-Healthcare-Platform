@@ -8,6 +8,7 @@ how sure are you, how much of it converted, and what still needs me.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -94,6 +95,16 @@ class UploadOut(BaseModel):
     delimiter: str | None = None
     sheets: list[SheetOut]
     status: str
+    reused_profiles: list[str] = Field(
+        default_factory=list,
+        description="Sheets whose mapping came from a profile this clinic already "
+        "confirmed. These need no review and no model call.",
+    )
+    duplicate_of: uuid.UUID | None = Field(
+        default=None,
+        description="A byte-identical file this clinic already committed. Importing "
+        "it again would duplicate work someone has already done.",
+    )
 
 
 class CellOut(BaseModel):
@@ -133,9 +144,31 @@ class ValidationOut(BaseModel):
 class CommitOut(BaseModel):
     session_id: uuid.UUID
     status: str
-    committed: dict[str, int] = Field(description="Rows written, per entity.")
-    skipped: dict[str, int] = Field(description="Rows not written, and why not.")
+    committed: dict[str, int] = Field(description="Rows written, per sheet.")
+    skipped: dict[str, int] = Field(
+        description="Rows not written per sheet, because they await review."
+    )
+    conflicts: list[str] = Field(
+        default_factory=list,
+        description="Rows a person must decide about, such as a match against a "
+        "patient who was previously deleted.",
+    )
     message: str
+
+
+class ProfileOut(BaseModel):
+    """A mapping this clinic confirmed, reused when a file of that shape returns."""
+
+    id: uuid.UUID
+    name: str
+    header_fingerprint: str = Field(
+        description="The sorted, normalized headers hashed: what identifies a file "
+        "of this shape even if columns are reordered or recapitalised."
+    )
+    entity: str
+    mapping: dict[str, str]
+    version: int = Field(description="Incremented each time a reviewer changes it.")
+    updated_at: datetime
 
 
 class MappingIn(BaseModel):

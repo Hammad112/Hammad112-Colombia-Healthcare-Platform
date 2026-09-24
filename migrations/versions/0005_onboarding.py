@@ -220,7 +220,18 @@ def upgrade() -> None:
         sa.Column("error", sa.Text(), nullable=True),
         _enum_check(
             "status",
-            ["received", "analyzed", "mapped", "validated", "committed", "failed"],
+            # `needs_review` is the state a blocked import rests in: validated,
+            # but with rows or questions a person must resolve before it can be
+            # committed. It is distinct from `failed`, which is unreadable.
+            [
+                "received",
+                "analyzed",
+                "mapped",
+                "validated",
+                "needs_review",
+                "committed",
+                "failed",
+            ],
             "import_session_status_valid",
         ),
         schema="onboarding",
@@ -294,6 +305,12 @@ def upgrade() -> None:
     )
 
     # ------------------------------------------------------------------ security
+    # `app.specialties` is new in this revision. Migration 0001 granted ALL
+    # TABLES IN SCHEMA app, which applies only to the tables that existed then,
+    # so a table added later needs its own grant or the runtime role cannot
+    # read it at all.
+    op.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON app.specialties TO "{role}"')
+
     op.execute(f'GRANT USAGE ON SCHEMA onboarding TO "{role}"')
     op.execute(
         f'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA onboarding TO "{role}"'
@@ -329,6 +346,7 @@ def downgrade() -> None:
     op.execute("DROP POLICY IF EXISTS clinic_isolation ON app.specialties")
     for table in _SCOPED_TABLES:
         op.execute(f"DROP POLICY IF EXISTS clinic_isolation ON onboarding.{table}")
+    op.execute(f'REVOKE ALL ON app.specialties FROM "{role}"')
     op.execute(f'REVOKE ALL ON ALL TABLES IN SCHEMA onboarding FROM "{role}"')
     op.execute(f'REVOKE ALL ON SCHEMA onboarding FROM "{role}"')
 

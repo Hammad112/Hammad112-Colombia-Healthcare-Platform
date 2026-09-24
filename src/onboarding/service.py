@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.onboarding import normalizers as norm
-from src.onboarding.canonical import Entity, Field, field_for
+from src.onboarding.canonical import Entity, Field, field_for, required_fields
 from src.onboarding.matcher import Proposal, SheetMapping, guess_entity, match_sheet
 from src.onboarding.reader import ReadResult, Sheet
 
@@ -238,20 +238,27 @@ def validate(
                 row.reviews.append(f"{column}: {outcome.message}")
         rows.append(row)
 
+    # In the file's own column order, and including the columns nobody mapped.
+    # Iterating the mapping instead would reorder the screen against the
+    # spreadsheet the reviewer is comparing it to, and would hide every unmapped
+    # column so they could not be mapped at all.
     reports = tuple(
         ColumnReport(
-            column=column,
-            target_field=target,
-            confidence="confirmed",
-            reason="Confirmed by the reviewer.",
+            column=header,
+            target_field=mapping.get(header),
+            confidence="confirmed" if mapping.get(header) else "not imported",
+            reason=(
+                "Confirmed by the reviewer."
+                if mapping.get(header)
+                else "Deliberately not imported."
+            ),
             auto=True,
-            total=sum(counts[column].values()),
-            valid=counts[column][norm.Status.VALID.value],
-            review=counts[column][norm.Status.REVIEW.value],
-            invalid=counts[column][norm.Status.INVALID.value],
+            total=sum(counts[header].values()) if header in counts else 0,
+            valid=counts[header][norm.Status.VALID.value] if header in counts else 0,
+            review=counts[header][norm.Status.REVIEW.value] if header in counts else 0,
+            invalid=counts[header][norm.Status.INVALID.value] if header in counts else 0,
         )
-        for column, target in mapping.items()
-        if target is not None
+        for header in sheet.headers
     )
     return rows, reports
 
@@ -311,6 +318,101 @@ def summarise(
         valid_rows=tally[norm.Status.VALID.value],
         review_rows=tally[norm.Status.REVIEW.value],
         invalid_rows=tally[norm.Status.INVALID.value],
+        warnings=report.warnings,
+        questions=report.questions,
+    )
+
+
+def _column_to_dict(column: ColumnReport) -> dict[str, Any]:
+    return {
+        "column": column.column,
+        "target_field": column.target_field,
+        "confidence": column.confidence,
+        "reason": column.reason,
+        "auto": column.auto,
+        "total": column.total,
+        "valid": column.valid,
+        "review": column.review,
+        "invalid": column.invalid,
+    }
+
+
+def report_to_dict(report: SheetReport) -> dict[str, Any]:
+    """Serialise a sheet report for the session's `report` column."""
+    return {
+        "sheet": report.sheet,
+        "entity": report.entity.value,
+        "entity_reason": report.entity_reason,
+        "columns": [_column_to_dict(c) for c in report.columns],
+        "missing_required": list(report.missing_required),
+        "total_rows": report.total_rows,
+        "valid_rows": report.valid_rows,
+        "review_rows": report.review_rows,
+        "invalid_rows": report.invalid_rows,
+        "warnings": list(report.warnings),
+        "questions": list(report.questions),
+    }
+
+
+def report_from_dict(data: dict[str, Any]) -> SheetReport:
+    return SheetReport(
+        sheet=data["sheet"],
+        entity=Entity(data["entity"]),
+        entity_reason=data.get("entity_reason", ""),
+        columns=tuple(ColumnReport(**column) for column in data.get("columns", ())),
+        missing_required=tuple(data.get("missing_required", ())),
+        total_rows=data.get("total_rows", 0),
+        valid_rows=data.get("valid_rows", 0),
+        review_rows=data.get("review_rows", 0),
+        invalid_rows=data.get("invalid_rows", 0),
+        warnings=tuple(data.get("warnings", ())),
+        questions=tuple(data.get("questions", ())),
+    )
+
+
+def apply_profile(report: SheetReport, mapping: dict[str, str | None]) -> SheetReport:
+    """Re-state a report under a mapping a person confirmed.
+
+    A confirmed column is no longer a proposal, so its confidence becomes
+    "confirmed" and it is pre-ticked. A column the reviewer cleared is shown as
+    deliberately not imported, rather than as something the matcher failed on.
+    """
+    columns = tuple(
+        ColumnReport(
+            column=c.column,
+            target_field=mapping.get(c.column),
+            confidence="confirmed" if mapping.get(c.column) else "not imported",
+            reason=(
+                "Confirmed for this clinic."
+                if mapping.get(c.column)
+                else "Deliberately not imported."
+            ),
+            auto=True,
+            total=c.total,
+            valid=c.valid,
+            review=c.review,
+            invalid=c.invalid,
+        )
+        for c in report.columns
+    )
+    assigned = {target for target in mapping.values() if target}
+    missing = tuple(
+        name for name in (f.name for f in required_fields(report.entity)) if name not in assigned
+    )
+    if report.entity is Entity.PATIENT and (
+        "full_name" in assigned or {"given_names", "family_names"} <= assigned
+    ):
+        missing = tuple(m for m in missing if m not in {"full_name", "given_names", "family_names"})
+    return SheetReport(
+        sheet=report.sheet,
+        entity=report.entity,
+        entity_reason=report.entity_reason,
+        columns=columns,
+        missing_required=missing,
+        total_rows=report.total_rows,
+        valid_rows=report.valid_rows,
+        review_rows=report.review_rows,
+        invalid_rows=report.invalid_rows,
         warnings=report.warnings,
         questions=report.questions,
     )
