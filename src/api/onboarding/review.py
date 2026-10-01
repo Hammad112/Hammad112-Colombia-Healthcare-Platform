@@ -24,9 +24,9 @@ import contextlib
 import html
 import re
 import uuid
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from src.api.dependencies import ClinicScopeDep, SessionDep
@@ -360,6 +360,80 @@ async def review_screen(
     never written. Nothing is imported until you press Import.
   </p>
 </main></body></html>""")
+
+
+@router.get(
+    "/",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+    summary="Choose a spreadsheet to import",
+)
+async def upload_screen(db: SessionDep, scope: ClinicScopeDep, request: Request) -> HTMLResponse:
+    """Pick a file, and see the imports already started for this clinic.
+
+    Deliberately plain: a file input, and a list of recent sessions so a half
+    finished import can be picked up rather than started again. The staff
+    interface proper belongs to M11; this is the "(basic)" the scope asks for.
+    """
+    recent = await repository.list_sessions(db, clinic_id=scope.clinic_id, limit=10)
+    query = f"?clinic_id={scope.clinic_id}"
+
+    rows = "".join(
+        f"<tr><td><code>{_escape(session.filename)}</code></td>"
+        f"<td>{_escape(session.status)}</td>"
+        f'<td class="note">{_escape(session.started_at.strftime("%Y-%m-%d %H:%M"))}</td>'
+        f'<td><a href="/onboarding/uploads/{session.id}/review{query}">open</a></td></tr>'
+        for session in recent
+    )
+    table = (
+        f"<h2>Imports already started</h2><table>"
+        f"<tr><th>File</th><th>Status</th><th>Started</th><th></th></tr>{rows}</table>"
+        if recent
+        else '<p class="note">No imports yet for this clinic.</p>'
+    )
+
+    return HTMLResponse(f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Import a spreadsheet</title>
+<style>{_STYLE}</style></head>
+<body><main>
+  <h1>Import a spreadsheet</h1>
+  <p class="sub">Excel (.xlsx) or CSV. Nothing is written to the clinic until you
+     confirm the mapping on the next screen.</p>
+  <div class="card">
+    <form method="post" action="/onboarding/upload{query}"
+          enctype="multipart/form-data">
+      <p><input type="file" name="file" accept=".xlsx,.csv,.txt,.tsv" required></p>
+      <p><button type="submit">Read this file</button></p>
+    </form>
+  </div>
+  {table}
+  <p class="note" style="margin-top:20px">
+    Synthetic data only. This screen is served on loopback and is not available
+    once real patient data is enabled.
+  </p>
+</main></body></html>""")
+
+
+@router.post("/upload", include_in_schema=False)
+async def upload_from_screen(
+    db: SessionDep,
+    scope: ClinicScopeDep,
+    file: Annotated[UploadFile, File(description="The clinic's spreadsheet.")],
+) -> RedirectResponse:
+    """Hand the file to the ingestion endpoint, then go to the mapping screen.
+
+    The API route does the work, so the screen cannot drift from it: a file
+    uploaded here and one uploaded through Swagger take the same path.
+    """
+    from src.api.onboarding.routes import upload
+
+    body = await upload(db, scope, file)
+    return RedirectResponse(
+        f"/onboarding/uploads/{body.session_id}/review?clinic_id={scope.clinic_id}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
 
 
 @router.post("/uploads/{session_id}/review/structure", include_in_schema=False)

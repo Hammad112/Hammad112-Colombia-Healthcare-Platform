@@ -1224,3 +1224,30 @@ async def test_a_reference_to_a_doctor_nobody_defines_blocks_the_commit(
     assert any("not in this file" in reason for reason in validation["blocking"]), validation[
         "blocking"
     ]
+
+
+async def test_a_file_can_be_uploaded_from_a_page(scoped: TestClient) -> None:
+    """The scope asks for an upload UI, not only an API endpoint.
+
+    Every other step had a screen while the upload itself was reachable only
+    through Swagger or curl, which is not a UI for clinic staff. The page posts
+    to the same ingestion route, so the two cannot drift apart.
+    """
+    page = scoped.get("/onboarding/").text
+    assert 'type="file"' in page
+    assert 'enctype="multipart/form-data"' in page
+
+    posted = scoped.post(
+        "/onboarding/upload",
+        files={"file": ("from_page.csv", PREAMBLE_CSV)},
+        follow_redirects=False,
+    )
+    assert posted.status_code == 303
+    # Straight to the mapping screen, carrying the session it just created.
+    assert "/review?clinic_id=" in posted.headers["location"]
+
+    session_id = posted.headers["location"].split("/uploads/")[1].split("/review")[0]
+    assert scoped.get(f"/onboarding/uploads/{session_id}").status_code == 200
+
+    # And the new import is listed for someone to pick up again.
+    assert "from_page.csv" in scoped.get("/onboarding/").text
