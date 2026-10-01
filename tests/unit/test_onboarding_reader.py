@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import codecs
 import csv
+import pickle
 import subprocess
 import sys
 from pathlib import Path
@@ -23,10 +24,13 @@ from src.onboarding.reader import (
     detect_kind,
     inspect_archive,
     read,
+    read_isolated,
     sniff_delimiter,
 )
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "onboarding"
+#: The project root, so a probe subprocess can resolve `src` by `-m`.
+_ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -553,3 +557,143 @@ def test_a_warning_names_the_real_line_number(tmp_path: Path) -> None:
     sheet = read(_csv(tmp_path, raw), {"csv.overlong_rows": True}).sheets[0]
     # The ragged row is line 3, not line 2.
     assert any("Row 3" in warning for warning in sheet.warnings)
+
+
+# ------------------------------------------- parsing in a throwaway process
+# The parsing libraries are the importer's largest attack surface: the file
+# arrives from outside, and zipfile, the XML parser and openpyxl are C or
+# C-adjacent code reading attacker-shaped input. The guards above refuse the
+# attacks we know about; isolation bounds the ones we do not.
+
+
+def test_an_isolated_read_returns_the_same_result_as_an_inline_one() -> None:
+    """Isolation must not change what is read, only where it runs."""
+    path = FIXTURES / "1_clean_ips.xlsx"
+    assert read_isolated(path) == read(path)
+
+
+def test_an_isolated_read_carries_structure_questions_back(tmp_path: Path) -> None:
+    """The questions cross the process boundary, or a CSV cannot be confirmed."""
+    path = tmp_path / "preamble.csv"
+    path.write_bytes(b"CLINICA X\n\nA;B;C\n1;2;3\n")
+
+    asked = read_isolated(path)
+    assert [q.id for q in asked.questions] == ["csv.header_row"]
+
+    approved = read_isolated(path, {"csv.header_row": True})
+    assert approved.sheets[0].headers == ("A", "B", "C")
+    assert approved.sheets[0].rows == (("1", "2", "3"),)
+
+
+def test_a_refusal_from_the_child_reaches_the_caller_verbatim() -> None:
+    """A refusal is a decision, not a crash, and its wording is for a person.
+
+    The worker exits with its own code for this so the parent can tell a file it
+    declined to read from a parse that died.
+    """
+    with pytest.raises(UnreadableFile, match=r"uncompressed|expands"):
+        read_isolated(FIXTURES / "5_zip_bomb.xlsx")
+
+
+def test_the_worker_exit_code_matches_the_one_the_parent_expects() -> None:
+    """The two constants are duplicated to avoid an import cycle, so pin them.
+
+    The worker imports the reader, so the reader cannot import the worker. If
+    they ever disagree, a refusal would be reported as a crash.
+    """
+    from src.onboarding import parse_worker, reader
+
+    assert parse_worker.EXIT_UNREADABLE == reader.EXIT_UNREADABLE
+
+
+def test_a_child_that_dies_is_reported_as_an_unreadable_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A segfault or a kill must not reach the reviewer as a 500.
+
+    This is the case isolation exists for: a library failing in a way no guard
+    of ours can catch. The child is replaced with one that dies, because making
+    openpyxl actually segfault is not something a test can rely on.
+    """
+    from src.onboarding import reader as reader_module
+
+    path = tmp_path / "x.csv"
+    path.write_bytes(b"A;B\n1;2\n")
+
+    # The dead child also emits a usable pickle. A reader that only checked
+    # whether stdout parses would accept this; only the exit code says the parse
+    # died, and half-written output from a killed process is not a result.
+    plausible = pickle.dumps(read(path))
+
+    def _dies(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(
+            args=[], returncode=-11, stdout=plausible, stderr=b"Segmentation fault"
+        )
+
+    monkeypatch.setattr(reader_module.subprocess, "run", _dies)
+    with pytest.raises(UnreadableFile, match="could not be read"):
+        read_isolated(path)
+
+
+def test_a_parse_that_never_finishes_is_stopped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A parse that hangs must not hold an API worker forever."""
+    from src.onboarding import reader as reader_module
+
+    path = tmp_path / "x.csv"
+    path.write_bytes(b"A;B\n1;2\n")
+
+    seen: dict[str, object] = {}
+
+    def _hangs(*args: object, **kwargs: object) -> None:
+        # Recorded, so this asserts that a timeout was requested rather than
+        # only that we handle the exception when something else raises it.
+        seen.update(kwargs)
+        raise subprocess.TimeoutExpired(cmd="parse", timeout=1)
+
+    monkeypatch.setattr(reader_module.subprocess, "run", _hangs)
+    with pytest.raises(UnreadableFile, match="longer than"):
+        read_isolated(path)
+
+    assert seen.get("timeout") == reader_module.PARSE_TIMEOUT_SECONDS
+
+
+def test_a_truncated_stream_from_the_child_is_not_trusted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A library printing to stdout would corrupt the pickle; that is not a result."""
+    from src.onboarding import reader as reader_module
+
+    path = tmp_path / "x.csv"
+    path.write_bytes(b"A;B\n1;2\n")
+
+    def _garbage(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=b"not a pickle", stderr=b""
+        )
+
+    monkeypatch.setattr(reader_module.subprocess, "run", _garbage)
+    with pytest.raises(UnreadableFile, match="could not be read"):
+        read_isolated(path)
+
+
+def test_the_child_does_not_import_openpyxl_for_a_csv(tmp_path: Path) -> None:
+    """openpyxl pulls in numpy, about half a second of startup per process.
+
+    Every parse now runs in its own process, so a CSV upload paying for a
+    library it never touches would be a cost on every import. This asserts the
+    laziness that avoids it rather than trusting a comment about it.
+    """
+    path = tmp_path / "x.csv"
+    path.write_bytes(b"A;B\n1;2\n")
+    probe = (
+        f"import sys; sys.argv = ['w', {str(path)!r}];"
+        "from src.onboarding import parse_worker;"
+        "parse_worker.main(sys.argv[1:]);"
+        "sys.stderr.write('OPENPYXL' if 'openpyxl' in sys.modules else 'CLEAN')"
+    )
+    done = subprocess.run(  # noqa: S603  (fixed argv, no shell)
+        [sys.executable, "-c", probe], capture_output=True, check=True, cwd=_ROOT
+    )
+    assert done.stderr.decode().endswith("CLEAN")

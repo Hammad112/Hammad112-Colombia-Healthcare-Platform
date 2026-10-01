@@ -22,18 +22,23 @@ from __future__ import annotations
 import codecs
 import csv
 import io
+import json
+import pickle
+import subprocess
+import sys
 import zipfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Any, Final
 
 # defusedxml must be imported before openpyxl parses anything: openpyxl's own
 # documentation states it does not defend against billion-laughs or quadratic
 # blowup unless defusedxml is installed. Importing it patches the XML stack.
 import defusedxml  # noqa: F401  (imported for the side effect, not the name)
-import openpyxl
-from openpyxl.worksheet.worksheet import Worksheet
+
+if TYPE_CHECKING:
+    from openpyxl.worksheet.worksheet import Worksheet
 
 # Signatures we accept, checked against the bytes rather than the extension.
 _ZIP_MAGIC: Final = b"PK\x03\x04"
@@ -76,6 +81,37 @@ _CANDIDATE_DELIMITERS: Final = (";", ",", "\t", "|")
 # rather than refused. ASCII record separator does not occur in spreadsheet
 # text, so no line is ever split on it.
 SINGLE_COLUMN: Final = chr(30)
+
+
+#: `preexec_fn` and RLIMIT_AS are POSIX only. On Windows the timeout and the
+#: process boundary still apply; the memory cap does not. That is stated rather
+#: than worked around, because a Windows job object would be a new dependency for
+#: a limit the archive guards already approximate.
+try:
+    import resource
+
+    _CAN_LIMIT = True
+except ImportError:  # pragma: no cover - Windows
+    _CAN_LIMIT = False
+
+#: Where the worker runs from, so `-m` resolves the package however the API was
+#: started.
+_PROJECT_ROOT: Final = Path(__file__).resolve().parents[2]
+
+#: Mirrors `parse_worker.EXIT_UNREADABLE`. Not imported from there: the worker
+#: imports this module, and an import cycle would be worse than one duplicated
+#: integer with a test asserting the two agree.
+EXIT_UNREADABLE: Final = 3
+
+#: How long a parse may take before the child is killed. Generous, because a
+#: 5,000-row workbook on a slow disk is a normal import. What this stops is a
+#: parse that never finishes holding an API worker forever.
+PARSE_TIMEOUT_SECONDS: Final = 120
+
+#: Address space the child may use, where the platform enforces it. openpyxl
+#: holds a sheet in memory, so this exceeds the largest real workbook; what it
+#: stops is a decompression bug allocating without bound.
+PARSE_MEMORY_BYTES: Final = 2 * 1024 * 1024 * 1024
 
 
 class UnreadableFile(Exception):
@@ -481,6 +517,19 @@ def read_csv(path: Path, answers: Mapping[str, bool] | None = None) -> ReadResul
 
 
 # --------------------------------------------------------------------- Excel
+def _openpyxl() -> Any:
+    """openpyxl, imported on first use.
+
+    It pulls in numpy, which costs roughly half a second of interpreter startup.
+    A CSV import never touches a workbook, and every parse now runs in its own
+    process (`read_isolated`), so paying that at module scope would charge every
+    CSV upload for a library it does not use.
+    """
+    import openpyxl
+
+    return openpyxl
+
+
 def _cell_text(value: object) -> str:
     """Render a cell as text without inventing a format.
 
@@ -558,7 +607,7 @@ def _formula_text(path: Path) -> dict[tuple[str, int, int], str]:
     cell visible so validation can reject it, and keeps an injected payload
     intact so the export layer can neutralise it rather than lose it.
     """
-    workbook = openpyxl.load_workbook(path, read_only=False, data_only=False)
+    workbook = _openpyxl().load_workbook(path, read_only=False, data_only=False)
     try:
         formulas: dict[tuple[str, int, int], str] = {}
         for worksheet in workbook.worksheets:
@@ -586,7 +635,7 @@ def _structure(path: Path) -> dict[str, _SheetStructure]:
     patient, and a hidden column often holds the code the clinic actually keys
     on, so neither may be discovered only by accident.
     """
-    workbook = openpyxl.load_workbook(path, read_only=False, data_only=True)
+    workbook = _openpyxl().load_workbook(path, read_only=False, data_only=True)
     try:
         structure: dict[str, _SheetStructure] = {}
         for worksheet in workbook.worksheets:
@@ -619,7 +668,7 @@ def read_excel(path: Path) -> ReadResult:
 
     # data_only=True returns the cached result of a formula rather than its text.
     try:
-        workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        workbook = _openpyxl().load_workbook(path, read_only=True, data_only=True)
         formulas = _formula_text(path)
     except Exception as error:
         raise UnreadableFile(f"File is not a readable workbook: {error}") from error
@@ -703,6 +752,106 @@ def read_excel(path: Path) -> ReadResult:
         return ReadResult(sheets=tuple(sheets), warnings=tuple(warnings))
     finally:
         workbook.close()
+
+
+def _log() -> Any:
+    """The logger, imported on use.
+
+    Only the failure paths below log, and they run in the parent. Importing
+    structlog at module scope would cost every parse worker about 240ms of
+    startup for a logger it never calls.
+    """
+    from src.core.logging import get_logger
+
+    return get_logger(__name__)
+
+
+def read_isolated(path: Path, answers: Mapping[str, bool] | None = None) -> ReadResult:
+    """Read a file in a separate process, and refuse it if that process dies.
+
+    The parsing libraries are the importer's largest attack surface: the file
+    arrives from outside, and `zipfile`, the XML parser and openpyxl are C or
+    C-adjacent code reading attacker-shaped input. The guards in this module
+    refuse the attacks we know about -- a zip bomb, an external entity, a renamed
+    executable -- but a memory-exhaustion or segfault bug inside a library is not
+    something a guard in our own code can catch. Isolating the parse means the
+    worst case is a dead child and a refusal a reviewer can read, rather than a
+    dead API worker.
+
+    There is no fallback to parsing in this process: a caller that asked for
+    isolation and did not get it should be told, not quietly given the thing it
+    was trying to avoid.
+    """
+    command = [sys.executable, "-m", "src.onboarding.parse_worker", str(path)]
+    if answers:
+        command.append(json.dumps(dict(answers)))
+
+    try:
+        # S603: the argv is fixed in this function and `shell` is false. The only
+        # value from outside is the path, which is passed as one argument and is
+        # never interpreted by a shell.
+        completed = subprocess.run(  # noqa: S603
+            command,
+            capture_output=True,
+            timeout=PARSE_TIMEOUT_SECONDS,
+            cwd=_PROJECT_ROOT,
+            preexec_fn=_limit_child if _CAN_LIMIT else None,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as expired:
+        raise UnreadableFile(
+            f"Reading this file took longer than {PARSE_TIMEOUT_SECONDS} seconds and was "
+            f"stopped. A spreadsheet that slow to read is usually corrupt; try opening "
+            f"it in Excel and saving it again."
+        ) from expired
+
+    if completed.returncode == EXIT_UNREADABLE:
+        # The child decided this, and wrote the message for the person who
+        # uploaded the file, so it is passed through rather than replaced.
+        raise UnreadableFile(completed.stderr.decode("utf-8", "replace").strip())
+
+    if completed.returncode != 0:
+        # The parse died rather than refusing: a crash, a kill, or the memory
+        # cap. The reviewer is told the file could not be read, and the detail
+        # goes to the log, because a stack trace is not a message to a
+        # receptionist.
+        detail = completed.stderr.decode("utf-8", "replace").strip()
+        _log().error(
+            "onboarding.parse_crashed",
+            returncode=completed.returncode,
+            detail=detail[-2000:] or None,
+        )
+        raise UnreadableFile(
+            "This file could not be read. It may be corrupt or built in a way the "
+            "reader cannot handle; try saving it again from Excel, or export it as CSV."
+        )
+
+    try:
+        # S301: this is the stdout of a child we spawned ourselves, running our
+        # own module. No clinic file is ever unpickled -- the file goes into the
+        # child as bytes and comes back as our own dataclasses.
+        result = pickle.loads(completed.stdout)  # noqa: S301
+    except Exception as error:
+        # A truncated stream, or a library that printed to stdout and corrupted
+        # it. Either way there is no result to return.
+        _log().error("onboarding.parse_unreadable_output", error=str(error))
+        raise UnreadableFile("This file could not be read.") from error
+
+    if not isinstance(result, ReadResult):  # pragma: no cover - defensive
+        raise UnreadableFile("This file could not be read.")
+    return result
+
+
+def _limit_child() -> None:  # pragma: no cover - POSIX only, runs in the child
+    """Cap the child's address space so a runaway allocation dies alone.
+
+    Only ever called where `resource` imported, which mypy cannot see because it
+    type-checks for one platform at a time.
+    """
+    resource.setrlimit(  # type: ignore[attr-defined]
+        resource.RLIMIT_AS,  # type: ignore[attr-defined]
+        (PARSE_MEMORY_BYTES, PARSE_MEMORY_BYTES),
+    )
 
 
 def read(path: Path, answers: Mapping[str, bool] | None = None) -> ReadResult:

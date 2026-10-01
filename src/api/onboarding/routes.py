@@ -45,7 +45,7 @@ from src.api.onboarding.schemas import (
 )
 from src.onboarding import repository, service
 from src.onboarding.canonical import Entity
-from src.onboarding.reader import ReadResult, UnreadableFile, read
+from src.onboarding.reader import ReadResult, UnreadableFile, read_isolated
 
 router = APIRouter()
 
@@ -162,7 +162,7 @@ async def upload(
                 handle.write(chunk)
 
         try:
-            result = read(target)
+            result = read_isolated(target)
         except UnreadableFile as error:
             # The reader's refusals are written for the person who uploaded the
             # file, so they are passed through rather than replaced.
@@ -361,7 +361,7 @@ async def answer_structure(
     answers[body.id] = body.approved
 
     try:
-        result = read(source, answers)
+        result = read_isolated(source, answers)
     except UnreadableFile as error:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
 
