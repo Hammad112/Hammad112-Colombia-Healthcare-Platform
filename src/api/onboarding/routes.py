@@ -45,6 +45,7 @@ from src.api.onboarding.schemas import (
 )
 from src.onboarding import repository, service
 from src.onboarding.canonical import Entity
+from src.onboarding.matcher import SHARED_FIELDS
 from src.onboarding.reader import ReadResult, UnreadableFile, read_isolated
 
 router = APIRouter()
@@ -421,7 +422,11 @@ async def set_mapping(
             f"These columns are not in the sheet: {sorted(unknown)}.",
         )
 
-    assigned = [target for target in body.mapping.values() if target]
+    # The name fields are exempt: RIPS exports a name in four columns, and
+    # those are parts of one value rather than rival versions of it.
+    assigned = [
+        target for target in body.mapping.values() if target and target not in SHARED_FIELDS
+    ]
     duplicated = {t for t in assigned if assigned.count(t) > 1}
     if duplicated:
         raise HTTPException(

@@ -13,6 +13,7 @@ import pytest
 
 from src.onboarding.canonical import Entity
 from src.onboarding.matcher import (
+    Confidence,
     guess_entity,
     match_column,
     match_sheet,
@@ -217,3 +218,81 @@ def test_an_unhelpfully_named_sheet_is_judged_by_its_columns() -> None:
     )
     assert guessed is Entity.PATIENT
     assert "%" in reason
+
+
+# --------------------------------------------------- RIPS-shaped exports
+# RIPS archivo US and Resolución 1036 de 2022 both split a name into four
+# fields, and every IPS must emit them to bill. A clinic exporting in the shape
+# the government asked for is therefore the normal case, not an exotic one.
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        ("tipoDocumentoIdentificacion", "document_type"),
+        ("numDocumentoIdentificacion", "document_number"),
+        ("primerNombre", "given_names"),
+        ("segundoNombre", "given_names"),
+        ("primerApellido", "family_names"),
+        ("segundoApellido", "family_names"),
+        ("fechaNacimiento", "birth_date"),
+    ],
+)
+def test_rips_camel_case_headers_are_recognised(header: str, expected: str) -> None:
+    """camelCase was collapsing to one word, so these matched nothing at all.
+
+    `normalize_header` casefolds, which destroys the only boundary in
+    `primerNombre`. Splitting before that is what makes a government-shaped
+    export readable.
+    """
+    proposal = match_column(header, Entity.PATIENT)
+    assert proposal.field is not None, f"{header} matched nothing"
+    assert proposal.field.name == expected
+
+
+def test_a_one_word_product_name_still_matches_after_the_split() -> None:
+    """Splitting camelCase also splits "WhatsApp" into "whats app".
+
+    Fixed by keeping every alias in both spellings rather than a list of brand
+    names that would need maintaining forever. This test exists because the
+    camelCase change broke it.
+    """
+    proposal = match_column("WhatsApp", Entity.PATIENT)
+    assert proposal.field is not None
+    assert proposal.field.name == "phone_e164"
+
+
+def test_four_name_columns_all_reach_the_two_name_fields() -> None:
+    """Four columns for two fields is not two columns competing for one.
+
+    Every other field keeps the rule that a second column would silently
+    overwrite the first; the name parts are joined instead, because that is what
+    they are.
+    """
+    headers = (
+        "primerNombre",
+        "segundoNombre",
+        "primerApellido",
+        "segundoApellido",
+    )
+    mapping = match_sheet(headers, Entity.PATIENT)
+    targets = {p.column: (p.field.name if p.field else None) for p in mapping.proposals}
+
+    assert targets["primerNombre"] == "given_names"
+    assert targets["segundoNombre"] == "given_names"
+    assert targets["primerApellido"] == "family_names"
+    assert targets["segundoApellido"] == "family_names"
+
+
+def test_the_rips_document_number_is_confident_enough_to_pre_tick() -> None:
+    """A weak match is not pre-ticked, and an unticked document number is fatal.
+
+    `_default_mapping` only pre-ticks confident proposals, and `_apply_patients`
+    skips any row with no document number. So a fuzzy-only match on
+    `numDocumentoIdentificacion` means a RIPS export validates, commits, reports
+    success and writes nobody. The alias is what makes it exact.
+    """
+    proposal = match_column("numDocumentoIdentificacion", Entity.PATIENT)
+    assert proposal.field is not None
+    assert proposal.field.name == "document_number"
+    assert proposal.confidence is Confidence.EXACT

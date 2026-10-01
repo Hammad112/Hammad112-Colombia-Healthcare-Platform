@@ -90,6 +90,13 @@ _PATIENT: Final = (
             "nro documento",
             "nro doc",
             "num doc",
+            # RIPS names this field `numDocumentoIdentificacion` (archivo US,
+            # Resolución 3374 de 2000, and the JSON schema since). Without the
+            # alias it only reaches `document_number` by fuzzy score, which is
+            # too weak to pre-tick -- and an unticked document number means
+            # every row is skipped at apply time for having no identifier.
+            "num documento identificacion",
+            "numero documento identificacion",
             "numero de identificacion",
             "identificacion",
             "documento",

@@ -83,13 +83,23 @@ def normalize_header(header: str) -> str:
     punctuation goes because `No.`, `N°` and `#` are all written for the same
     column; and runs of spaces collapse because hand-made files are untidy.
     """
-    text = strip_accents(header)
+    # camelCase before casefolding, which is what destroys the word boundary:
+    # RIPS names its own fields `primerNombre` and `numDocumentoIdentificacion`
+    # (Resolución 1036 de 2022), so a clinic exporting in the shape the
+    # government asked for would otherwise match nothing at all.
+    text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", header)
+    text = strip_accents(text)
     # Underscores are word separators in exported headers ("id_type",
     # "doctor_id"), but `\w` keeps them, so they are replaced explicitly.
     # Without this an exported column never matches the words it is made of.
     text = re.sub(r"[^\w\s]+|_", " ", text)
     return " ".join(text.split())
 
+
+#: Fields more than one column may legitimately fill, because the columns hold
+#: parts of one value rather than rival versions of it. Everything else keeps the
+#: rule that two columns mapping to one field means one silently wins.
+SHARED_FIELDS: Final = frozenset({"given_names", "family_names"})
 
 # Headers that mean "no column", not "a column called nothing".
 _EMPTY_HEADERS: Final = frozenset({"", "n a", "na", "sin nombre", "column1", "unnamed 0"})
@@ -127,6 +137,12 @@ def match_column(header: str, entity: Entity, *, taken: set[str] | None = None) 
     """Propose a canonical field for one column header."""
     taken = taken or set()
     words = normalize_header(header)
+    #: The header with its spaces removed. Splitting camelCase is what lets a
+    #: RIPS heading like `primerNombre` match, but it also splits a product name
+    #: a clinic writes as one word: "WhatsApp" becomes "whats app", which the
+    #: alias `whatsapp` no longer matches. Comparing the joined form too handles
+    #: every such name without a list of brands to maintain.
+    joined = words.replace(" ", "")
 
     if words in _EMPTY_HEADERS:
         return Proposal(header, None, Confidence.NONE, 0.0, "The column has no heading.")
@@ -148,7 +164,8 @@ def match_column(header: str, entity: Entity, *, taken: set[str] | None = None) 
 
     # 1. exact
     for field in available:
-        if words in _alias_forms(field):
+        forms = _alias_forms(field)
+        if words in forms or joined in forms:
             return Proposal(header, field, Confidence.EXACT, 100.0, "The heading is a known name.")
 
     # 2. whole-word containment, longest alias first so "tipo de documento"
@@ -223,6 +240,15 @@ def match_sheet(headers: tuple[str, ...], entity: Entity) -> SheetMapping:
     decided: dict[str, Proposal] = {}
     for proposal in ranked:
         if proposal.field is None:
+            decided[proposal.column] = proposal
+            continue
+        if proposal.field.name in SHARED_FIELDS:
+            # RIPS splits a name into four fields (Resolución 1036 de 2022:
+            # primerNombre, segundoNombre, primerApellido, segundoApellido) and
+            # a clinic exporting in that shape sends four columns for our two.
+            # They are parts of one value, not two columns competing for it, so
+            # they share the field and are joined in file order on conversion.
+            taken.add(proposal.field.name)
             decided[proposal.column] = proposal
             continue
         if proposal.field.name in taken:

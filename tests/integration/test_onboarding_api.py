@@ -1353,3 +1353,87 @@ async def test_re_importing_the_same_consent_does_not_duplicate_it(
 
     await apply_clinic_scope(session, ClinicScope(clinic_id=_clinic_of(scoped)))
     assert len((await session.scalars(select(Consent))).all()) == 1
+
+
+# ------------------------------------- a government-shaped export (RIPS)
+# RIPS archivo US and Resolución 1036 de 2022 split a patient name into four
+# fields, and every IPS must emit them to get paid. So the shape that imports
+# with no corrections is the shape clinics already produce, which is what makes
+# "please export separate name columns" a cheap request rather than a burden.
+
+RIPS_CSV = (
+    b"tipoDocumentoIdentificacion;numDocumentoIdentificacion;"
+    b"primerNombre;segundoNombre;primerApellido;segundoApellido;"
+    b"fechaNacimiento;celular\n"
+    b"CC;1033445566;Carlos;Andres;Perez;Gomez;1987-04-12;3101234567\n"
+    b"CC;1044556677;Maria;Jose;Rojas;Sanin;1992-11-03;3151112233\n"
+)
+
+
+async def test_a_rips_shaped_export_imports_with_no_corrections(
+    scoped: TestClient, session: AsyncSession
+) -> None:
+    """The decision-relevant measurement for the client's name question.
+
+    Nothing is corrected, nothing goes to review, and the four name columns are
+    joined into the two canonical fields in the file's own column order.
+    """
+    body = _upload_bytes(scoped, "rips.csv", RIPS_CSV)
+    session_id = body["session_id"]
+
+    assert body["structure_questions"] == []
+    columns = {c["column"]: c["target_field"] for s in body["sheets"] for c in s["columns"]}
+    assert columns["primerNombre"] == "given_names"
+    assert columns["segundoNombre"] == "given_names"
+    assert columns["primerApellido"] == "family_names"
+    assert columns["segundoApellido"] == "family_names"
+
+    validation = scoped.post(f"/onboarding/uploads/{session_id}/validate").json()
+    assert validation["can_commit"] is True, validation["blocking"]
+    assert sum(s["review_rows"] for s in validation["sheets"]) == 0
+
+    committed = scoped.post(f"/onboarding/uploads/{session_id}/commit")
+    assert committed.status_code == 200, committed.text
+    assert sum(committed.json()["committed"].values()) == 2, committed.json()
+
+    # The names that were actually written, not just the row count. Without the
+    # join, the second part overwrites the first and this patient is stored as
+    # "Andres Gomez" -- same row count, wrong person.
+    from src.registry.models import Patient
+
+    await apply_clinic_scope(session, ClinicScope(clinic_id=_clinic_of(scoped)))
+    stored = (await session.scalars(select(Patient))).all()
+    names = {(p.given_names, p.family_names) for p in stored}
+    assert ("Carlos Andres", "Perez Gomez") in names, names
+    assert ("Maria Jose", "Rojas Sanin") in names, names
+
+
+async def test_the_same_patients_in_one_column_need_a_human(
+    scoped: TestClient,
+) -> None:
+    """The cost of the other export shape, measured against the same people.
+
+    Both names are three tokens with no recognised compound given name, which
+    is the shape nothing can split: "Carlos Perez Gomez" could be one given
+    name and two surnames, or two given names and one. Ley 2129 de 2021 lets
+    parents choose surname order, so no positional rule settles it either.
+
+    A compound given name the dictionary knows ("Juan Carlos") does resolve, so
+    it is deliberately not used here: this measures the cost of the shape that
+    cannot be resolved, not of every three-token name.
+    """
+    raw = (
+        b"tipoDocumentoIdentificacion;numDocumentoIdentificacion;nombreCompleto\n"
+        b"CC;1033445566;Carlos Perez Gomez\n"
+        b"CC;1044556677;Luis Rojas Sanin\n"
+    )
+    body = _upload_bytes(scoped, "one_column.csv", raw)
+    session_id = body["session_id"]
+
+    validation = scoped.post(f"/onboarding/uploads/{session_id}/validate").json()
+    # Every row needs an answer, and the commit is blocked until they get one.
+    assert sum(s["review_rows"] for s in validation["sheets"]) == 2
+
+    rows = scoped.get(f"/onboarding/uploads/{session_id}/rows", params={"status": "review"}).json()
+    assert len(rows) == 2
+    assert all(any("given name" in reason for reason in row["reviews"]) for row in rows)

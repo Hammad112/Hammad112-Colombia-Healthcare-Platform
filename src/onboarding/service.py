@@ -33,7 +33,7 @@ from src.onboarding.canonical import (
     field_for,
     required_fields,
 )
-from src.onboarding.matcher import Proposal, SheetMapping, guess_entity, match_sheet
+from src.onboarding.matcher import SHARED_FIELDS, Proposal, SheetMapping, guess_entity, match_sheet
 from src.onboarding.reader import ReadResult, Sheet
 
 # A column-level decision the file cannot make for itself. Held on the session
@@ -350,7 +350,15 @@ def validate(
                 )
             )
             if outcome.status is norm.Status.VALID:
-                row.values[target] = outcome.value
+                if target in SHARED_FIELDS and target in row.values:
+                    # A second column for the same name field: joined in the
+                    # file's column order, so "primerNombre" then
+                    # "segundoNombre" reads as the person writes their name.
+                    existing = str(row.values[target]).strip()
+                    addition = str(_text(outcome.value) or "").strip()
+                    row.values[target] = f"{existing} {addition}".strip()
+                else:
+                    row.values[target] = outcome.value
             elif outcome.status is norm.Status.INVALID:
                 row.errors.append(f"{column}: {outcome.message}")
             else:
