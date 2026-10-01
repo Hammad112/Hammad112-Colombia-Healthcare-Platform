@@ -144,6 +144,14 @@ def _ask_model(sheet: Sheet, entity: Entity, mapping: SheetMapping) -> dict[str,
     if not settings.mapping_llm_available:
         return {}
 
+    # A heading is only safely a heading once we know the file HAS headings.
+    # When a structure question is outstanding the "headers" may be row 1 of the
+    # data -- a cédula, a name, a phone -- and sending those as column names
+    # would put patient values in a provider's payload and in our logs. Nothing
+    # is asked until a person has said how the file reads.
+    if sheet.questions:
+        return {}
+
     unresolved = [p for p in mapping.proposals if not p.auto]
     if not unresolved:
         return {}
@@ -318,12 +326,18 @@ def validate(
         if offset in excluded:
             continue
         corrected = (corrections or {}).get(offset, {})
+        # Converted in the file's column order, not the mapping's. The mapping
+        # arrives from JSONB, which does not preserve insertion order, and two
+        # columns joined into one field (primerApellido + segundoApellido) would
+        # otherwise be joined in whatever order the database handed back --
+        # storing "Gomez Perez" for a patient whose file says "Perez Gomez".
+        in_file_order = [(header, mapping[header]) for header in sheet.headers if header in mapping]
         row = RowResult(
             row_number=offset,
             entity=entity,
             raw={header: corrected.get(header, raw_row[index[header]]) for header in sheet.headers},
         )
-        for column, target in mapping.items():
+        for column, target in in_file_order:
             if target is None:
                 continue
             canonical = field_for(entity, target)
@@ -413,6 +427,8 @@ def _apply(canonical: Field, raw: str, order: norm.DayFirst) -> norm.Outcome[Any
             return norm.split_full_name(raw)
         case "boolean":
             return norm.boolean(raw)
+        case "weekday":
+            return norm.weekday(raw)
         case "consent_purpose":
             return norm.consent_purpose(raw)
         case "consent_evidence":

@@ -304,3 +304,82 @@ def test_an_unknown_heading_is_suggested_but_never_pre_ticked(
     assert unknown.target_field == "external_ref"
     assert unknown.confidence == "suggested"
     assert unknown.auto is False  # never applied without a person
+
+
+# ----------------------------- the sentinel test that routes a real FILE
+# The test at the top of this file hand-builds a ColumnQuestion, so the
+# sentinels cannot be present by construction -- it could never fail. These
+# route an actual file through `service.analyse` with the model stage enabled,
+# which is where a patient value really could become a "column heading".
+
+
+def test_no_patient_value_reaches_a_provider_from_a_real_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """A file with no heading row makes row 1 the headers -- and row 1 is a patient.
+
+    `_ask_model` ran at analyse time, before anyone had answered the question
+    about how the file reads, so a cédula, a name and a phone number were sent
+    to the provider as column names and written to the log. Nothing is asked
+    until a person has said the file has headings.
+    """
+    from src.onboarding import service
+    from src.onboarding.reader import read
+
+    asked: list[str] = []
+
+    def _spy(question: llm.ColumnQuestion, entity: Entity, **kwargs: Any) -> None:
+        asked.append(question.header)
+        raise llm.LLMUnavailable("spy")
+
+    monkeypatch.setattr(llm, "suggest", _spy)
+    monkeypatch.setattr(
+        "src.onboarding.service.get_settings",
+        lambda: _settings(openai_api_key="a-key-so-the-stage-is-enabled"),
+    )
+
+    path = tmp_path / "headerless.csv"
+    path.write_bytes(
+        b"CC;9999888877;Zzyzx Sentinelensen Marcadorez;3009998877\n"
+        b"CC;1020304051;Luis Gomez Diaz;3151112233\n"
+    )
+    parsed = read(path)
+    # The reader does raise the question; the point is what happens meanwhile.
+    assert [q.id for q in parsed.questions] == ["csv.no_header_row"]
+
+    service.analyse(parsed)
+
+    assert asked == [], f"these values were sent to a provider: {asked}"
+    for sentinel in SENTINELS:
+        assert sentinel not in " ".join(asked)
+
+
+def test_an_ambiguous_heading_still_reaches_the_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """The fix must not silence the stage the PDF's scope asks for.
+
+    A file whose headings are real but one of which is meaningless still gets a
+    model proposal, because there is no patient value in a heading the clinic
+    actually wrote.
+    """
+    from src.onboarding import service
+    from src.onboarding.reader import read
+
+    asked: list[str] = []
+
+    def _spy(question: llm.ColumnQuestion, entity: Entity, **kwargs: Any) -> None:
+        asked.append(question.header)
+        raise llm.LLMUnavailable("spy")
+
+    monkeypatch.setattr(llm, "suggest", _spy)
+    monkeypatch.setattr(
+        "src.onboarding.service.get_settings",
+        lambda: _settings(openai_api_key="a-key-so-the-stage-is-enabled"),
+    )
+
+    path = tmp_path / "ok.csv"
+    path.write_bytes(b"TIPO DOC;IDENTIFICACION;COLUMNA RARA XYZ\nCC;1020304050;abc\n")
+    service.analyse(read(path))
+
+    assert asked == ["COLUMNA RARA XYZ"]

@@ -110,3 +110,32 @@ def test_an_entity_with_no_references_is_not_checked() -> None:
     rows = [_patient(2, document_type="CC", document_number="1020304050")]
     known = {"doctor_ref": set[str](), "patient_document": set[str]()}
     assert service.find_dangling_references(rows, Entity.PATIENT, known=known) == {}
+
+
+def test_two_columns_for_one_name_field_join_in_the_files_order() -> None:
+    """The mapping arrives from JSONB, which does not preserve insertion order.
+
+    Iterating the mapping joined "primerApellido" and "segundoApellido" in
+    whatever order the database handed back, so a patient whose file says
+    "Perez Gomez" was stored as "Gomez Perez" -- the surnames reversed, marked
+    valid. The file's own column order is the only order that means anything.
+    """
+    from src.onboarding.reader import Sheet
+
+    sheet = Sheet(
+        name="Pacientes",
+        headers=("TIPO DOC", "IDENTIFICACION", "NOMBRES", "PRIMER APELLIDO", "SEGUNDO APELLIDO"),
+        rows=(("CC", "1020304050", "Ana", "Perez", "Gomez"),),
+        header_row=1,
+    )
+    # Deliberately scrambled, as a JSONB round trip would return it.
+    mapping = {
+        "IDENTIFICACION": "document_number",
+        "TIPO DOC": "document_type",
+        "SEGUNDO APELLIDO": "family_names",
+        "NOMBRES": "given_names",
+        "PRIMER APELLIDO": "family_names",
+    }
+
+    rows, _ = service.validate(sheet, Entity.PATIENT, mapping, decisions={})
+    assert rows[0].values["family_names"] == "Perez Gomez"

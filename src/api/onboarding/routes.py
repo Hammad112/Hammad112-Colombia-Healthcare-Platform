@@ -24,7 +24,7 @@ import hashlib
 import shutil
 import tempfile
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Final
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
@@ -146,7 +146,14 @@ async def upload(
     profile is applied and there is nothing left to correct — which is what lets
     a repeat import run without a model call.
     """
-    target = Path(tempfile.mkdtemp()) / (file.filename or "upload")
+    # The filename is the client's, and `Path(dir) / name` does not confine it:
+    # "../x" climbs out of the temp directory and an absolute path replaces it
+    # entirely, so `target.parent` became a directory outside our own that the
+    # `finally` below then deleted. Only the last component is used, and the
+    # directory to remove is the one we created.
+    upload_dir = Path(tempfile.mkdtemp())
+    safe_name = PurePosixPath((file.filename or "upload").replace("\\", "/")).name
+    target = upload_dir / (safe_name or "upload")
     digest = hashlib.sha256()
     written = 0
     keep_upload = False
@@ -234,7 +241,7 @@ async def upload(
         # path, so a refused or oversized upload still deletes: leaving patient
         # data on disk for a file nobody can act on would be a slow leak.
         if not keep_upload:
-            shutil.rmtree(target.parent, ignore_errors=True)
+            shutil.rmtree(upload_dir, ignore_errors=True)
 
 
 @router.get(

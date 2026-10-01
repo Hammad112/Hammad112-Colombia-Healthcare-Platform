@@ -342,3 +342,178 @@ def test_a_non_date_value_does_not_derail_the_column_decision() -> None:
     """
     assert n.detect_day_first(["15/10/2026", "pendiente", "", "03/04/1991"]) is n.DayFirst.DAY_FIRST
     assert n.detect_day_first(["pendiente", "por confirmar"]) is n.DayFirst.UNDECIDED
+
+
+# ------------------------------------------------------------------- weekday
+# `weekday` is a required availability field that had no normalizer, so "lunes",
+# "Wednesday" and "7" were all stored as text and all reported valid. The column
+# is a SmallInteger with CHECK (weekday BETWEEN 0 AND 6).
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("lunes", 0),
+        ("LUNES", 0),
+        ("Miércoles", 2),
+        ("miercoles", 2),  # the same day without its accent
+        ("Wednesday", 2),
+        ("mié", 2),
+        ("domingo", 6),
+        ("Sunday", 6),
+    ],
+)
+def test_a_day_name_becomes_the_number_date_weekday_uses(raw: str, expected: int) -> None:
+    """Monday is 0, matching `date.weekday()`, so no conversion is needed later."""
+    outcome = n.weekday(raw)
+    assert outcome.status is n.Status.VALID
+    assert outcome.value == expected
+
+
+@pytest.mark.parametrize("raw", ["1", "3", "7", "0"])
+def test_a_numbered_day_is_asked_about_never_guessed(raw: str) -> None:
+    """1 is Monday under ISO-8601 and Sunday to someone counting from Sunday.
+
+    Nothing in a single cell says which, and choosing wrong moves a doctor's
+    whole working week by a day. 7 is refused for the same reason plus a second
+    one: `date.weekday()` has no 7, so a file with both 0 and 7 is using two
+    conventions at once.
+    """
+    outcome = n.weekday(raw)
+    assert outcome.status is n.Status.REVIEW
+    assert "ambiguous" in outcome.message
+
+
+def test_an_unrecognised_day_is_refused() -> None:
+    assert n.weekday("xyz").status is n.Status.REVIEW
+
+
+def test_an_empty_day_is_refused() -> None:
+    assert n.weekday("   ").status is n.Status.REVIEW
+
+
+def test_every_required_field_that_needs_conversion_has_a_normalizer() -> None:
+    """A field with no normalizer is stored as whatever the file said.
+
+    `weekday` was required, had no normalizer, and so "lunes", "Wednesday" and
+    "7" were all reported valid for a SmallInteger column constrained to 0-6.
+    Testing the normalizer in isolation does not catch that: the binding in
+    `canonical.py` is what makes it run, so the binding is what is asserted.
+
+    Fields legitimately stored as written are listed explicitly, so adding a new
+    one is a deliberate decision rather than an omission.
+    """
+    from src.onboarding.canonical import ALL_FIELDS
+
+    stored_as_written = {
+        # Free text the clinic owns; there is nothing to convert or refuse.
+        "given_names",
+        "family_names",
+        "specialty",
+        "name",
+        "office_number",
+        "eps",
+        "external_ref",
+        "secondary_contact_name",
+        "telegram_chat_id",
+        "cancellation_reason",
+        "consultation_type",
+        "source",
+        "slot_ref",
+        # A reference resolved against other rows, not converted.
+        "doctor_ref",
+        "patient_document",
+        # Stored encrypted and only ever masked for display; nothing in M1 sends
+        # to it. When dispatch arrives (M4) this needs a normalizer, because an
+        # address that cannot receive is a silently failed notification.
+        "email",
+        # A doctor's name is stored as written: the given-name/surname split
+        # exists for patients, who are matched on it. Doctors are matched on the
+        # clinic's own code.
+        "full_name",
+    }
+
+    unbound = sorted(
+        f.name for f in ALL_FIELDS if f.normalizer is None and f.name not in stored_as_written
+    )
+    assert unbound == [], f"these fields convert nothing: {unbound}"
+
+
+# ------------------------------------- found by an adversarial review
+# All three were silent or fatal on input a Colombian clinic really exports.
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("19900315", dt.date(1990, 3, 15)),
+        ("20260101", dt.date(2026, 1, 1)),
+    ],
+)
+def test_a_compact_yyyymmdd_date_is_read_as_a_date(raw: str, expected: dt.date) -> None:
+    """RIPS and many Colombian systems export birth dates as yyyymmdd.
+
+    Eight digits were treated as an Excel day count, so 19900315 was added to
+    1899-12-30 and raised OverflowError -- which reached the person uploading as
+    "Internal server error" and refused the whole file.
+    """
+    outcome = n.date(raw, order=n.DayFirst.UNDECIDED)
+    assert outcome.status is n.Status.VALID
+    assert outcome.value == expected
+
+
+@pytest.mark.parametrize("raw", ["19901332", "99999999", "45678901"])
+def test_eight_digits_that_are_not_a_date_are_refused_not_crashed(raw: str) -> None:
+    """A refusal a receptionist can read, never an unhandled exception."""
+    assert n.date(raw, order=n.DayFirst.UNDECIDED).status is n.Status.REVIEW
+
+
+def test_a_serial_too_large_to_be_a_date_is_refused() -> None:
+    """Excel's own last date is serial 2958465; beyond it there is no date.
+
+    Unbounded, the addition raised OverflowError instead of returning something
+    a reviewer could act on.
+    """
+    outcome = n.date("2958466", order=n.DayFirst.UNDECIDED)
+    assert outcome.status is n.Status.REVIEW
+    assert "too large" in outcome.message
+
+
+def test_surnames_first_with_a_comma_is_not_swapped() -> None:
+    """ "PEREZ GOMEZ, CARLOS ANDRES" is surnames first, and the comma says so.
+
+    Read left to right it stored the surnames as given names and the given names
+    as surnames, and marked the row valid -- a patient filed under the wrong
+    identity with nothing to notice. This is the one name shape that IS
+    decidable, because the comma is an explicit signal rather than a guess.
+    """
+    outcome = n.split_full_name("PEREZ GOMEZ, CARLOS ANDRES")
+    assert outcome.status is n.Status.VALID
+    assert outcome.value is not None
+    assert outcome.value.given_names == "CARLOS ANDRES"
+    assert outcome.value.family_names == "PEREZ GOMEZ"
+
+
+def test_two_tokens_either_side_of_a_comma_still_split_on_the_comma() -> None:
+    outcome = n.split_full_name("GOMEZ, ANA")
+    assert outcome.status is n.Status.VALID
+    assert outcome.value is not None
+    assert outcome.value.given_names == "ANA"
+    assert outcome.value.family_names == "GOMEZ"
+
+
+@pytest.mark.parametrize("raw", ["Perez Gomez,", ", Ana", "A, B, C"])
+def test_a_name_whose_comma_decides_nothing_is_refused(raw: str) -> None:
+    """One side missing, or more than one comma, decides nothing."""
+    assert n.split_full_name(raw).status is n.Status.REVIEW
+
+
+def test_a_name_without_a_comma_keeps_its_previous_reading() -> None:
+    """The comma rule must not change the shapes that already worked."""
+    four = n.split_full_name("Carlos Andres Perez Gomez")
+    assert four.status is n.Status.VALID
+    assert four.value is not None
+    assert four.value.given_names == "Carlos Andres"
+
+    # Three tokens stay undecidable: no comma, no rule.
+    assert n.split_full_name("Carlos Perez Gomez").status is n.Status.REVIEW

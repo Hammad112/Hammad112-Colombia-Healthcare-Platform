@@ -237,6 +237,80 @@ def phone(raw: str, *, region: str = "CO") -> Outcome[str]:
     )
 
 
+# --------------------------------------------------------------------- weekday
+#: Spanish and English day names, to `date.weekday()` numbering where Monday is
+#: 0. Accents are stripped before lookup, so "miercoles" and "miércoles" both
+#: resolve; a clinic file has both spellings.
+_WEEKDAYS: Final = {
+    "lunes": 0,
+    "monday": 0,
+    "lun": 0,
+    "mon": 0,
+    "l": 0,
+    "martes": 1,
+    "tuesday": 1,
+    "mar": 1,
+    "tue": 1,
+    "miercoles": 2,
+    "wednesday": 2,
+    "mie": 2,
+    "wed": 2,
+    "jueves": 3,
+    "thursday": 3,
+    "jue": 3,
+    "thu": 3,
+    "j": 3,
+    "viernes": 4,
+    "friday": 4,
+    "vie": 4,
+    "fri": 4,
+    "v": 4,
+    "sabado": 5,
+    "saturday": 5,
+    "sab": 5,
+    "sat": 5,
+    "s": 5,
+    "domingo": 6,
+    "sunday": 6,
+    "dom": 6,
+    "sun": 6,
+    "d": 6,
+}
+
+
+def weekday(raw: str) -> Outcome[int]:
+    """Return a weekday as `date.weekday()` numbers it, or refuse.
+
+    A bare number is ambiguous and is NOT guessed: "1" is Monday under ISO-8601
+    and Sunday in a spreadsheet written by someone counting from Sunday, and
+    nothing in a single cell says which. Getting it wrong moves a doctor's whole
+    working week by a day, so a numeric column asks rather than picking.
+
+    `7` is refused outright rather than read as Sunday: under ISO numbering it
+    is Sunday, but `date.weekday()` has no 7, and a file containing both 0 and 7
+    is using two conventions at once.
+    """
+    text = strip_accents(raw.strip())
+    if not text:
+        return _review("weekday.empty", "No day of the week given.")
+
+    if (found := _WEEKDAYS.get(text)) is not None:
+        return _valid(found, "weekday.name")
+
+    if text.isdigit():
+        return _review(
+            "weekday.numeric",
+            f"{raw!r} is a number, and a numbered day is ambiguous: 1 is Monday in "
+            f"one convention and Sunday in another. Export the day names instead, "
+            f"or confirm which convention this file uses.",
+        )
+
+    return _review(
+        "weekday.unknown",
+        f"{raw!r} is not a day of the week this system recognises.",
+    )
+
+
 # --------------------------------------------------------------------- consent
 #: How clinics write the purpose a patient agreed to. Anything unrecognised goes
 #: to review rather than being mapped to the broadest purpose: consent to an
@@ -417,6 +491,26 @@ def split_full_name(raw: str) -> Outcome[SplitName]:
     if not text:
         return _review("name.empty", "No name given.")
 
+    # "PEREZ GOMEZ, CARLOS ANDRES" is surnames first. The comma says so, which
+    # makes this the one name shape that IS decidable -- and reading it
+    # left-to-right stored the surnames as given names and the given names as
+    # surnames, marked valid, which is a patient filed under the wrong identity.
+    if text.count(",") == 1:
+        family_part, _, given_part = text.partition(",")
+        family_part, given_part = family_part.strip(), given_part.strip()
+        if family_part and given_part:
+            return _valid(SplitName(given_part, family_part), "name.surnames_first_comma")
+        return _review(
+            "name.comma_incomplete",
+            f"{raw!r} has a comma but only one side of it. A name written "
+            f"'APELLIDOS, NOMBRES' needs both.",
+        )
+    if text.count(",") > 1:
+        return _review(
+            "name.multiple_commas",
+            f"{raw!r} has more than one comma, so where the surnames end cannot be read from it.",
+        )
+
     tokens = text.split()
 
     # Glue particles onto the token they modify: "de la Cruz" is one surname.
@@ -538,13 +632,37 @@ def date(raw: str, *, order: DayFirst, epoch_1904: bool = False) -> Outcome[dt.d
             return _invalid("date.impossible", f"{raw!r} is not a real date ({error}).")
 
     if text.isdigit():
+        # `19900315` is a compact date, not a serial: eight digits beginning
+        # with a plausible year is the form RIPS and many Colombian systems
+        # export, and reading it as a day count is how it became an
+        # OverflowError rather than a birth date.
+        if len(text) == 8:
+            try:
+                return _valid(dt.date.fromisoformat(text), "date.compact_iso")
+            except ValueError:
+                return _review(
+                    "date.compact_invalid",
+                    f"{raw!r} looks like a yyyymmdd date but is not a real one.",
+                )
         return _excel_serial(int(text), epoch_1904=epoch_1904)
 
     return _review("date.unrecognised", f"{raw!r} is not a date we recognise.")
 
 
+#: The largest serial Excel itself accepts, which is 31 December 9999. Beyond it
+#: there is no date to convert to, and adding the number to the epoch raises
+#: OverflowError rather than returning anything a reviewer could act on.
+_MAX_SERIAL: Final = 2_958_465
+
+
 def _excel_serial(serial: int, *, epoch_1904: bool) -> Outcome[dt.date]:
     """Convert a raw Excel serial, refusing the range Excel itself gets wrong."""
+    if serial > _MAX_SERIAL or serial < 0:
+        return _review(
+            "date.serial_out_of_range",
+            f"{serial} is too large to be a date. If this is a number rather than "
+            f"a date, the column is mapped to the wrong field.",
+        )
     if epoch_1904:
         return _valid(_EPOCH_1904 + dt.timedelta(days=serial), "date.serial_1904")
     if serial < _MIN_SAFE_1900_SERIAL:

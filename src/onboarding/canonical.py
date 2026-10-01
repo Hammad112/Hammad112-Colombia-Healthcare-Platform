@@ -432,6 +432,7 @@ _AVAILABILITY: Final = (
         "Day of the week the doctor works.",
         aliases=("dia", "dia de la semana", "day", "day of week", "weekday", "dia semana"),
         examples=("Lunes", "Monday"),
+        normalizer="weekday",
     ),
     Field(
         "start_time",

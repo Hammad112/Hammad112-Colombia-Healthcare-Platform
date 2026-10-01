@@ -7,12 +7,18 @@ about a column those stages left ambiguous, and only when a key is configured;
 with no key the column simply goes to the person confirming the import, which is
 where it would have gone anyway.
 
-**No patient value can reach a provider, structurally rather than by care.**
-`ColumnQuestion` carries a column *name*, our derived statistics, and examples
-we generated ourselves. It has no field that can hold a cell, so a caller cannot
-pass one by mistake, and `build_messages` is given nothing else. A sentinel test
-plants recognisable values in every fixture cell and asserts none of them
-appears in an outbound payload.
+**No patient value reaches a provider.** `ColumnQuestion` carries a column
+*name*, our derived statistics, and examples we generated ourselves; it has no
+field that can hold a cell, so a caller cannot pass one by mistake.
+
+The type alone is not sufficient, and claiming it was hid a real leak: a
+heading is only a heading once the file is known to HAVE headings. For a file
+with no heading row the reader's "headers" are row 1 of the data, so a cédula,
+a name and a phone number were sent as column names until `service._ask_model`
+learned to wait for the structure question to be answered. Two sentinel tests
+cover this now -- one on the payload shape, one that routes a real headerless
+file through `analyse` and asserts nothing was asked -- and the second fails if
+that wait is removed.
 
 **The model chooses from a list; it never writes a transform.** The response
 schema constrains `target_field` to an enum of canonical field names plus

@@ -307,15 +307,31 @@ async def apply_rows(
             return await _apply_specialties(session, clinic_id=clinic_id, rows=rows)
         case Entity.DOCTOR:
             return await _apply_doctors(session, clinic_id=clinic_id, rows=rows)
-        case _:
-            # Availability and appointments need the scheduling engine's booking
-            # transaction (M2), not a plain insert: an appointment written around
-            # the exclusion constraint could double-book a doctor.
+        case Entity.APPOINTMENT:
+            # An appointment written as a plain insert goes around the exclusion
+            # constraint that prevents double-booking, so it needs the scheduling
+            # engine's booking transaction (M2) rather than this path.
             return ApplyResult(
                 skipped=len(rows),
                 conflicts=(
-                    f"{entity.value} rows are staged but not applied: they need the "
+                    "appointment rows are staged but not applied: they need the "
                     "scheduling engine's booking transaction (M2).",
+                ),
+            )
+        case _:
+            # Availability is a plain insert -- `availability_rules` has only
+            # CHECK constraints, so no booking transaction is involved. What
+            # blocks it is `location_id`, which is NOT NULL on the model and has
+            # no canonical field feeding it: a rule has to say which sede it
+            # applies to, and whether a clinic has one location or several is an
+            # open question with the client. Staged and validated meanwhile, so
+            # the rows and their refusals are visible.
+            return ApplyResult(
+                skipped=len(rows),
+                conflicts=(
+                    f"{entity.value} rows are staged and validated but not applied: "
+                    "each rule needs the location it applies to, which this export "
+                    "does not carry.",
                 ),
             )
 
