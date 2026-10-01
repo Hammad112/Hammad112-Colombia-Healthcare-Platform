@@ -367,8 +367,12 @@ async def answer_structure(
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
 
     _PARSED[session_id] = result
-    if not any(sheet.questions for sheet in result.sheets):
-        # Nothing left to ask, so the upload itself is no longer needed.
+    # A question stays listed once answered, so a reviewer can see what they
+    # decided: "still raised" is not "still open". The upload is only needed
+    # while an *unanswered* question could change how the bytes are read, and
+    # holding a clinic's file on disk any longer than that is patient data left
+    # lying around for no reason.
+    if all(question.id in answers for sheet in result.sheets for question in sheet.questions):
         shutil.rmtree(source.parent, ignore_errors=True)
         _SOURCE.pop(session_id, None)
 

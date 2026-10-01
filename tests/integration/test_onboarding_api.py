@@ -1572,3 +1572,81 @@ async def test_a_utf16_export_with_no_bom_imports(scoped: TestClient) -> None:
     committed = scoped.post(f"/onboarding/uploads/{body['session_id']}/commit")
     assert committed.status_code == 200, committed.text
     assert sum(committed.json()["committed"].values()) == 1
+
+
+async def test_the_uploaded_file_is_deleted_once_its_questions_are_answered(
+    scoped: TestClient,
+) -> None:
+    """A clinic's spreadsheet must not sit on disk longer than it is needed.
+
+    It is kept only while an unanswered question could still change how the
+    bytes are read, because answering one re-reads the file. A question stays
+    listed after it is answered so the reviewer can see what they decided, and
+    an earlier version checked "any questions raised" rather than "any still
+    open" -- so the file was never deleted at all.
+    """
+    from src.api.onboarding.routes import _SOURCE
+
+    preamble = (
+        b"LISTADO CLINICA X\n\n"
+        b"TIPO DOC;IDENTIFICACION;NOMBRES;APELLIDOS\n"
+        b"CC;1088880001;Ana;Perez Gomez\n"
+    )
+    body = _upload_bytes(scoped, "kept.csv", preamble)
+    session_id = uuid.UUID(body["session_id"])
+
+    # An open question, so the bytes are still needed.
+    assert body["structure_questions"], "expected a question about this file"
+    assert session_id in _SOURCE
+    on_disk = _SOURCE[session_id]
+    assert on_disk.exists()
+
+    answered = scoped.post(
+        f"/onboarding/uploads/{session_id}/structure",
+        json={"id": "csv.header_row", "approved": True},
+    )
+    assert answered.status_code == 200, answered.text
+    # The question is still reported, now marked answered...
+    assert all(q["answered"] is not None for q in answered.json()["structure_questions"])
+    # ...and the file it was about is gone.
+    assert session_id not in _SOURCE
+    assert not on_disk.exists()
+
+
+async def test_a_file_with_nothing_to_ask_is_deleted_immediately(
+    scoped: TestClient,
+) -> None:
+    """Nothing to re-read means nothing to keep."""
+    from src.api.onboarding.routes import _SOURCE
+
+    body = _upload_bytes(
+        scoped,
+        "clean.csv",
+        b"TIPO DOC;IDENTIFICACION;NOMBRES;APELLIDOS\nCC;1088880002;Luis;Gomez Diaz\n",
+    )
+    assert body["structure_questions"] == []
+    assert uuid.UUID(body["session_id"]) not in _SOURCE
+
+
+async def test_two_commits_of_one_import_admit_exactly_one(
+    scoped: TestClient,
+) -> None:
+    """Pressing Import twice must not write the patients twice.
+
+    The second attempt sees a committed session and refuses, which is the same
+    guard a double-click on the confirmation screen hits.
+    """
+    body = _upload_bytes(
+        scoped,
+        "once.csv",
+        b"TIPO DOC;IDENTIFICACION;NOMBRES;APELLIDOS\nCC;1088880003;Marta;Rojas Sanin\n",
+    )
+    session_id = body["session_id"]
+    scoped.post(f"/onboarding/uploads/{session_id}/validate")
+
+    first = scoped.post(f"/onboarding/uploads/{session_id}/commit")
+    second = scoped.post(f"/onboarding/uploads/{session_id}/commit")
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 409
+    assert "already committed" in second.json()["detail"]
