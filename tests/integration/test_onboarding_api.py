@@ -1437,3 +1437,36 @@ async def test_the_same_patients_in_one_column_need_a_human(
     rows = scoped.get(f"/onboarding/uploads/{session_id}/rows", params={"status": "review"}).json()
     assert len(rows) == 2
     assert all(any("given name" in reason for reason in row["reviews"]) for row in rows)
+
+
+async def test_the_start_page_lists_clinics_without_needing_one(
+    scoped: TestClient,
+) -> None:
+    """The one page that cannot require a clinic, because it is where one is picked.
+
+    Every other route needs `clinic_id` in its address, because row-level
+    security compares it against the transaction. This page exists so a tester
+    does not have to paste a UUID for each file, so it is requested here without
+    one even though the fixture has created a clinic to list.
+    """
+    response = scoped.get("/onboarding/start", params={})
+    assert response.status_code == 200
+    page = response.text
+
+    # It links onward with the clinic already filled in.
+    assert f"/onboarding/?clinic_id={_clinic_of(scoped)}" in page
+    assert "import a file" in page
+
+
+async def test_the_start_page_says_so_when_there_are_no_clinics(
+    client: TestClient,
+) -> None:
+    """An empty database should explain itself rather than render an empty table.
+
+    This is the state a developer hits on a fresh checkout, and "No clinics yet"
+    with the command to fix it is more use than a page with nothing on it.
+    """
+    response = client.get("/onboarding/start")
+    assert response.status_code == 200
+    assert "No clinics yet" in response.text
+    assert "python main.py" in response.text

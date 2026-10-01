@@ -363,6 +363,57 @@ async def review_screen(
 
 
 @router.get(
+    "/start",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+    summary="Pick a clinic, then import into it",
+)
+async def start_screen(db: SessionDep) -> HTMLResponse:
+    """The only page that needs no clinic, because it is where one is chosen.
+
+    Every other route requires `clinic_id`, because row-level security compares
+    it against the transaction and without it nothing is visible. That is the
+    right default and is not relaxed here: this page just saves pasting a UUID
+    into the address bar for each file being tested.
+    """
+    from src.registry.repository import list_clinics
+
+    clinics = await list_clinics(db)
+    if not clinics:
+        return HTMLResponse(f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>No clinics yet</title>
+<style>{_STYLE}</style></head><body><main>
+  <h1>No clinics yet</h1>
+  <div class="card bad">This database has no clinics, so there is nothing to
+    import into. Run <code>python main.py</code> once to provision and seed it.</div>
+</main></body></html>""")
+
+    rows = "".join(
+        f"<tr><td><strong>{_escape(c.name)}</strong></td>"
+        f'<td class="note"><code>{c.id}</code></td>'
+        f'<td><a href="/onboarding/?clinic_id={c.id}">import a file</a></td></tr>'
+        for c in clinics
+    )
+    return HTMLResponse(f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Import a spreadsheet</title><style>{_STYLE}</style></head>
+<body><main>
+  <h1>Import a spreadsheet</h1>
+  <p class="sub">Pick the clinic to import into. Synthetic data only.</p>
+  <table>
+    <tr><th>Clinic</th><th>Id</th><th></th></tr>
+    {rows}
+  </table>
+  <p class="note" style="margin-top:20px">
+    Every other screen needs the clinic in its address, because the database
+    hides rows belonging to a clinic the request did not name. This page exists
+    so you do not have to type it.
+  </p>
+</main></body></html>""")
+
+
+@router.get(
     "/",
     response_class=HTMLResponse,
     include_in_schema=False,
