@@ -296,3 +296,19 @@ def test_the_rips_document_number_is_confident_enough_to_pre_tick() -> None:
     assert proposal.field is not None
     assert proposal.field.name == "document_number"
     assert proposal.confidence is Confidence.EXACT
+
+
+def test_an_entity_guess_with_no_evidence_says_so() -> None:
+    """A file with positional headings matches nothing, and must admit it.
+
+    `max` over an all-zero tie picks arbitrarily, and the message read "0% of
+    the columns match specialty fields" while reading the sheet as specialties —
+    a conclusion the evidence does not support, stated in the reviewer's own
+    words. Patients are what a clinic imports, so that is the default, and the
+    reason now says it is a guess.
+    """
+    entity, reason = guess_entity("export", ("column 1", "column 2", "column 3"))
+
+    assert entity is Entity.PATIENT
+    assert "guess" in reason.lower()
+    assert "0%" not in reason

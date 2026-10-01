@@ -697,3 +697,112 @@ def test_the_child_does_not_import_openpyxl_for_a_csv(tmp_path: Path) -> None:
         [sys.executable, "-c", probe], capture_output=True, check=True, cwd=_ROOT
     )
     assert done.stderr.decode().endswith("CLEAN")
+
+
+# ------------------------------------- found by adversarial probing
+# Both of these were silent: no crash, no refusal, no warning, wrong data.
+# That is the only failure class that reaches a clinic unnoticed.
+
+
+@pytest.mark.parametrize("encoding", ["utf-16-le", "utf-16-be"])
+def test_utf16_without_a_bom_is_decoded_not_mangled(tmp_path: Path, encoding: str) -> None:
+    """Excel's UTF-16 carries a BOM; a programmatic export may not.
+
+    Every single-byte codec "succeeds" on UTF-16 bytes, so the encoding ladder
+    cannot fail its way past cp1252: the file was read as text full of NULs and
+    imported as garbage. Byte order comes from where the NULs sit, because a
+    little-endian reading of big-endian bytes yields CJK characters rather than
+    raising -- "it decoded" is not evidence of the right order.
+    """
+    text = "TIPO DOC;IDENTIFICACION;NOMBRES\nCC;1020304050;José Muñoz\n"
+    sheet = read(_csv(tmp_path, text.encode(encoding))).sheets[0]
+
+    assert sheet.headers == ("TIPO DOC", "IDENTIFICACION", "NOMBRES")
+    assert sheet.rows == (("CC", "1020304050", "José Muñoz"),)
+
+
+def test_a_utf16_file_with_a_bom_keeps_no_bom_in_its_first_header(
+    tmp_path: Path,
+) -> None:
+    """The BOM must be consumed by a codec that strips it.
+
+    `utf-16-le` consumes no BOM, so probing for byte order before the BOM check
+    left U+FEFF glued to the first heading, which then matched no alias. The
+    probe runs after the BOM loop for that reason.
+    """
+    text = "TIPO DOC;IDENTIFICACION\nCC;1020304050\n"
+    sheet = read(_csv(tmp_path, text.encode("utf-16"))).sheets[0]
+
+    assert sheet.headers == ("TIPO DOC", "IDENTIFICACION")
+    assert not sheet.headers[0].startswith("\ufeff")
+
+
+def test_a_file_with_no_heading_row_is_asked_about(tmp_path: Path) -> None:
+    """Otherwise the first patient is silently consumed as column names.
+
+    Nothing in the file settles it: a clinic exporting without headings and one
+    whose headings happen to be words look identical. Approving names the
+    columns by position so every row stays data; declining reads the first row
+    as headings, which is what the importer would have done unasked.
+    """
+    path = _csv(tmp_path, b"CC;1020304050;Ana Perez\nCC;1020304051;Luis Gomez\n")
+
+    asked = read(path)
+    assert [q.id for q in asked.questions] == ["csv.no_header_row"]
+    # Unanswered, the first row is still taken as headings -- so the question is
+    # what stands between that reading and a committed import.
+    assert len(asked.sheets[0].rows) == 1
+
+    approved = read(path, {"csv.no_header_row": True})
+    assert approved.sheets[0].headers == ("column 1", "column 2", "column 3")
+    assert len(approved.sheets[0].rows) == 2
+    assert approved.sheets[0].rows[0] == ("CC", "1020304050", "Ana Perez")
+
+    declined = read(path, {"csv.no_header_row": False})
+    assert declined.sheets[0].headers == ("CC", "1020304050", "Ana Perez")
+
+
+def test_a_blank_heading_row_does_not_eat_the_first_patient(tmp_path: Path) -> None:
+    """A present-but-empty heading row was the original symptom.
+
+    Cells are stripped before blank rows are dropped, so "  ;  ;  " vanishes and
+    row 2 became the headings with no question asked at all.
+    """
+    path = _csv(tmp_path, b"  ;  ;  \n1;2;3\n4;5;6\n")
+
+    assert [q.id for q in read(path).questions] == ["csv.no_header_row"]
+    approved = read(path, {"csv.no_header_row": True})
+    assert [list(r) for r in approved.sheets[0].rows] == [["1", "2", "3"], ["4", "5", "6"]]
+
+
+@pytest.mark.parametrize(
+    ("label", "raw"),
+    [
+        ("spanish", b"TIPO DOC;IDENTIFICACION;NOMBRES\nCC;1020304050;Ana\n"),
+        ("rips", b"tipoDocumentoIdentificacion;numDocumentoIdentificacion\nCC;102030\n"),
+        ("two name columns", b"NOMBRES;APELLIDOS\nAna;Perez Gomez\n"),
+        ("single column", b"IDENTIFICACION\n1020304050\n"),
+        ("short labels", b"A;B;C\n1;2;3\n"),
+    ],
+)
+def test_a_real_heading_row_is_never_questioned(tmp_path: Path, label: str, raw: bytes) -> None:
+    """A question nobody needs teaches reviewers to click past the one that matters.
+
+    A one-column file is exempt outright: `_header_score` returns 0 below two
+    filled cells, and there is nothing useful to ask about a single column a
+    reviewer can see.
+    """
+    assert read(_csv(tmp_path, raw)).questions == ()
+
+
+def test_a_repeated_heading_is_not_mistaken_for_a_missing_one(tmp_path: Path) -> None:
+    """One cause, one question.
+
+    A repeated heading costs distinctness, which dropped the row below the
+    header floor and raised "this file has no headings" alongside the duplicate
+    question. A reviewer answering the wrong one first gets a worse file, so the
+    floor is scored on distinct values: repetition is a naming problem, not
+    evidence about the shape.
+    """
+    path = _csv(tmp_path, b"NOMBRE;NOMBRE;CELULAR\nAna;Perez;3101234567\n")
+    assert [q.id for q in read(path).questions] == ["csv.duplicate_headers"]

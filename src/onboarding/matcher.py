@@ -314,4 +314,15 @@ def guess_entity(sheet_name: str, headers: tuple[str, ...]) -> tuple[Entity, str
         matched = sum(1 for p in mapping.proposals if p.auto)
         scores.append((matched / max(len(headers), 1), entity))
     best_share, best_entity = max(scores)
+    if best_share == 0.0:
+        # Nothing matched anything, which happens when the headings carry no
+        # meaning at all: a file whose columns are named by position because it
+        # had no heading row. Saying "0% of the columns match specialty fields"
+        # while reading it as specialties states a conclusion the evidence does
+        # not support, and `max` over an all-zero tie picks arbitrarily. Patients
+        # are what a clinic imports, so that is the default, and the reason says
+        # plainly that the reviewer has to choose.
+        return Entity.PATIENT, (
+            "No column matched any known field, so this is a guess: choose what the sheet holds."
+        )
     return best_entity, f"{best_share:.0%} of the columns match {best_entity.value} fields."

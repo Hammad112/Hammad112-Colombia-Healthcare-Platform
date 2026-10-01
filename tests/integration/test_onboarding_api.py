@@ -1470,3 +1470,105 @@ async def test_the_start_page_says_so_when_there_are_no_clinics(
     assert response.status_code == 200
     assert "No clinics yet" in response.text
     assert "python main.py" in response.text
+
+
+async def test_a_headerless_file_blocks_then_imports_in_full(
+    scoped: TestClient,
+) -> None:
+    """The whole path for a file with no heading row.
+
+    Before the question existed, the first patient became the column names and
+    the import reported success with one row fewer than the file had. That is
+    the silent-truncation failure the milestone exists to prevent, so the
+    question blocks the commit until someone answers it.
+    """
+    raw = b"CC;1055660001;Ana Perez;3101234567\nCC;1055660002;Luis Gomez;3151112233\n"
+    body = _upload_bytes(scoped, "headerless.csv", raw)
+    session_id = body["session_id"]
+
+    assert [q["id"] for q in body["structure_questions"]] == ["csv.no_header_row"]
+    assert body["structure_questions"][0]["answered"] is None
+
+    blocked = scoped.post(f"/onboarding/uploads/{session_id}/validate").json()
+    assert blocked["can_commit"] is False
+    assert any("csv.no_header_row" in reason for reason in blocked["blocking"])
+    assert scoped.post(f"/onboarding/uploads/{session_id}/commit").status_code == 409
+
+    answered = scoped.post(
+        f"/onboarding/uploads/{session_id}/structure",
+        json={"id": "csv.no_header_row", "approved": True},
+    )
+    assert answered.status_code == 200, answered.text
+
+    sheet = answered.json()["sheets"][0]
+    assert [c["column"] for c in sheet["columns"]] == [
+        "column 1",
+        "column 2",
+        "column 3",
+        "column 4",
+    ]
+
+    # The reviewer maps the positional columns, as they would any others.
+    mapped = scoped.put(
+        f"/onboarding/uploads/{session_id}/mapping",
+        json={
+            "sheet": sheet["sheet"],
+            "mapping": {
+                "column 1": "document_type",
+                "column 2": "document_number",
+                "column 3": "full_name",
+                "column 4": "phone_e164",
+            },
+        },
+    )
+    assert mapped.status_code == 200, mapped.text
+
+    validation = scoped.post(f"/onboarding/uploads/{session_id}/validate").json()
+    assert validation["can_commit"] is True, validation["blocking"]
+    # Both rows of the file are data; neither was eaten as a heading.
+    assert sum(s["total_rows"] for s in validation["sheets"]) == 2
+
+
+async def test_a_headerless_file_declined_keeps_the_first_row_as_headings(
+    scoped: TestClient,
+) -> None:
+    """Declining is the reading the importer would have used unasked.
+
+    It loses the first record, which is exactly why the question exists -- but
+    it is the reviewer's decision, taken knowingly, and it never blocks forever.
+    """
+    raw = b"CC;1055660003;Marta Rojas;3151112244\nCC;1055660004;Jorge Diaz;3101239876\n"
+    body = _upload_bytes(scoped, "declined.csv", raw)
+    session_id = body["session_id"]
+
+    declined = scoped.post(
+        f"/onboarding/uploads/{session_id}/structure",
+        json={"id": "csv.no_header_row", "approved": False},
+    )
+    assert declined.status_code == 200
+    assert declined.json()["structure_questions"][0]["answered"] is False
+
+    validation = scoped.post(f"/onboarding/uploads/{session_id}/validate").json()
+    assert not any("csv.no_header_row" in reason for reason in validation["blocking"])
+
+
+async def test_a_utf16_export_with_no_bom_imports(scoped: TestClient) -> None:
+    """A programmatic UTF-16 export used to arrive as NUL-riddled mojibake."""
+    text = (
+        "TIPO DOC;IDENTIFICACION;NOMBRES;APELLIDOS;CELULAR\n"
+        "CC;1055660005;José;Muñoz Pérez;3101234567\n"
+    )
+    body = _upload_bytes(scoped, "le.csv", text.encode("utf-16-le"))
+    assert body["encoding"] == "utf-16-le"
+    assert {c["column"] for c in body["sheets"][0]["columns"]} == {
+        "TIPO DOC",
+        "IDENTIFICACION",
+        "NOMBRES",
+        "APELLIDOS",
+        "CELULAR",
+    }
+
+    scoped.post(f"/onboarding/uploads/{body['session_id']}/validate")
+    committed = scoped.post(f"/onboarding/uploads/{body['session_id']}/commit")
+    assert committed.status_code == 200, committed.text
+    assert sum(committed.json()["committed"].values()) == 1

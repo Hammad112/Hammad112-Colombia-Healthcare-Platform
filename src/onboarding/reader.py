@@ -248,6 +248,35 @@ def decode(raw: bytes) -> tuple[str, str]:
     A byte-order mark is trusted over the ladder. UTF-32's mark begins with
     UTF-16LE's, so the wider marks are tested first.
     """
+
+    # A UTF-16 file with no BOM is half NUL bytes, and every single-byte codec
+    # "succeeds" on it: the ladder cannot fail its way past cp1252, so the file
+    # would be read as text full of NULs and imported as garbage. Excel's own
+    # UTF-16 export carries a BOM and is handled by the loop below, which runs
+    # first so a BOM is always consumed by a codec that strips it; a
+    # programmatic export may have no BOM at all.
+    #
+    # Byte order comes from where the NULs sit, not from whether decoding
+    # raises: UTF-16LE reading of big-endian bytes yields CJK characters rather
+    # than failing, so "it decoded" is not evidence of the right order. In
+    # ASCII-ish text LE puts its NULs at odd offsets and BE at even ones.
+    def _bomless_utf16(raw: bytes) -> tuple[str, str] | None:
+        probe = raw[:4096]
+        if len(probe) < 4 or probe.count(0) <= len(probe) // 4:
+            return None
+        even = sum(1 for i in range(0, len(probe) - 1, 2) if probe[i] == 0)
+        odd = sum(1 for i in range(1, len(probe), 2) if probe[i] == 0)
+        if even == odd:
+            return None  # no clear order; fall through to the ladder
+        encoding = "utf-16-be" if even > odd else "utf-16-le"
+        try:
+            text = raw.decode(encoding)
+        except UnicodeDecodeError:
+            return None
+        if "\x00" in text:
+            return None  # not actually UTF-16 text, whatever it is
+        return text, encoding
+
     for mark, encoding in _BOMS:
         if raw.startswith(mark):
             try:
@@ -259,6 +288,9 @@ def decode(raw: bytes) -> tuple[str, str]:
                     f"File begins with a {encoding} byte-order mark but is not valid "
                     f"{encoding} ({error.reason})."
                 ) from error
+
+    if (found := _bomless_utf16(raw)) is not None:
+        return found
 
     for encoding in ENCODING_LADDER:
         try:
@@ -348,6 +380,42 @@ def _find_csv_header(rows: list[tuple[str, ...]]) -> int:
     return best
 
 
+#: A row scoring below this does not look like column labels.
+#:
+#: `_header_score` sums four ratios, so a row that is entirely distinct,
+#: entirely textual, entirely short and fully populated scores exactly 4.0 —
+#: which every real heading row does. A data row loses points on at least one:
+#: "CC;1020304050;Ana Perez" scores 3.67 because the cédula is not textual, and
+#: a row of numbers scores 3.0. Measured across both sets, the gap is 3.67 to
+#: 4.00, so the floor sits just under 4.
+#:
+#: This decides only whether to **ask**, never what the answer is. A heading row
+#: and a data row can be genuinely identical in shape — a clinic whose columns
+#: are all words, with no heading — and nothing in the file resolves that, so a
+#: person does.
+HEADER_SCORE_FLOOR: Final = 3.9
+
+
+def _looks_like_a_header(row: tuple[str, ...]) -> bool:
+    """Whether this row can be taken for column labels at all.
+
+    A one-column file is exempt: `_header_score` returns 0 for fewer than two
+    filled cells, so scoring it would flag every such file. There is also
+    nothing useful to ask -- a single column of document numbers with no
+    heading looks exactly like one with a heading, and positional naming would
+    not help a reviewer who can see the column.
+    """
+    filled = [cell for cell in row if cell.strip()]
+    if len(filled) < 2:
+        return True
+    # Scored on the distinct values. A repeated heading ("NOMBRE;NOMBRE;TEL")
+    # costs distinctness and would otherwise read as "not a heading row", which
+    # is a second question for something `csv.duplicate_headers` already
+    # explains -- and a reviewer who answers the wrong one first gets a worse
+    # file. Repetition is a naming problem, not evidence about the shape.
+    return _header_score(list(dict.fromkeys(filled))) >= HEADER_SCORE_FLOOR
+
+
 def read_csv(path: Path, answers: Mapping[str, bool] | None = None) -> ReadResult:
     """Read a delimited file.
 
@@ -401,8 +469,33 @@ def read_csv(path: Path, answers: Mapping[str, bool] | None = None) -> ReadResul
     # a judgement, so it is asked rather than assumed.
     decided = dict(answers or {})
     detected_header = _find_csv_header(rows)
+
+    # A file whose very first row is data, with no headings anywhere, would have
+    # that record silently consumed as column names. Nothing in the file says
+    # which it is -- a clinic exporting without headers and one whose headings
+    # happen to be numeric look identical -- so it is asked rather than guessed.
+    headerless = detected_header == 0 and not _looks_like_a_header(rows[0])
     # Declining means row 1, which is the file as written.
     header_index = detected_header if decided.get("csv.header_row") else 0
+    if headerless:
+        questions.append(
+            StructureQuestion(
+                id="csv.no_header_row",
+                finding=(
+                    f"The first row does not look like column headings: "
+                    f"{list(rows[0])[:4]!r}. If this file has no heading row, "
+                    f"reading it as one would lose that record."
+                ),
+                applied_if_approved=(
+                    "Treat the first row as data and name the columns by position "
+                    "(column 1, column 2, ...), so nothing is lost."
+                ),
+                applied_if_declined=(
+                    "Treat the first row as the headings, exactly as the file has it."
+                ),
+            )
+        )
+
     if detected_header > 0:
         questions.append(
             StructureQuestion(
@@ -419,7 +512,14 @@ def read_csv(path: Path, answers: Mapping[str, bool] | None = None) -> ReadResul
             )
         )
 
-    headers = rows[header_index]
+    if headerless and decided.get("csv.no_header_row"):
+        # Positional names, so every row stays data. The reviewer maps them on
+        # the confirmation screen exactly as they would any other column.
+        headers = tuple(f"column {position}" for position in range(1, len(rows[0]) + 1))
+        synthetic_header = True
+    else:
+        headers = rows[header_index]
+        synthetic_header = False
     width = len(headers)
 
     # Two columns with one name: whichever is mapped, the other silently loses.
@@ -463,7 +563,9 @@ def read_csv(path: Path, answers: Mapping[str, bool] | None = None) -> ReadResul
     overlong: list[int] = []
     # Declining leaves the row out entirely rather than cutting cells off it.
     keep_overlong = bool(decided.get("csv.overlong_rows"))
-    for number, row in zip(line_numbers[header_index + 1 :], rows[header_index + 1 :], strict=True):
+    # With invented headings the first row is data, not a heading.
+    first_data = header_index if synthetic_header else header_index + 1
+    for number, row in zip(line_numbers[first_data:], rows[first_data:], strict=True):
         if len(row) > width:
             overlong.append(number)
             if not keep_overlong:
@@ -505,7 +607,10 @@ def read_csv(path: Path, answers: Mapping[str, bool] | None = None) -> ReadResul
                 name=path.stem,
                 headers=headers,
                 rows=tuple(body),
-                header_row=line_numbers[header_index],
+                # With invented headings there is no header line in the file,
+                # so this reports 0: every data row still carries its own real
+                # line number, which is what a refusal points at.
+                header_row=0 if synthetic_header else line_numbers[header_index],
                 warnings=tuple(warnings),
                 questions=tuple(questions),
             ),
