@@ -20,7 +20,7 @@ import datetime as dt
 import hashlib
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +28,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.audit.context import AccessAction
 from src.audit.service import Access, record_accesses
 from src.core.crypto import blind_index
+from src.core.timezones import BOGOTA
+from src.identity.models import Consent, ConsentChannel, ConsentPurpose, EvidenceKind
 from src.onboarding.canonical import Entity
 from src.onboarding.matcher import normalize_header
 from src.onboarding.models import ImportProfile, ImportSession, StagingRow, TransformLogEntry
@@ -271,6 +273,12 @@ async def list_profiles(session: AsyncSession, *, clinic_id: uuid.UUID) -> list[
 
 
 # -------------------------------------------------------------------- apply
+#: Recorded on a consent that arrived in a spreadsheet. A real policy version
+#: names the text the patient actually agreed to; an import cannot know it, so it
+#: says so rather than claiming a version we did not show them.
+IMPORTED_POLICY_VERSION: Final = "imported-unknown"
+
+
 @dataclass(frozen=True, slots=True)
 class ApplyResult:
     created: int = 0
@@ -355,6 +363,9 @@ async def _apply_patients(
                 skipped += 1
                 continue
             _assign_patient(existing, values, given, family)
+            await _record_consent(
+                session, clinic_id=clinic_id, patient_id=existing.id, values=values
+            )
             updated += 1
             accesses.append(
                 Access(resource="patients", resource_id=str(existing.id), patient_id=existing.id)
@@ -373,6 +384,7 @@ async def _apply_patients(
         session.add(patient)
         await session.flush()
         created += 1
+        await _record_consent(session, clinic_id=clinic_id, patient_id=patient.id, values=values)
         accesses.append(
             Access(resource="patients", resource_id=str(patient.id), patient_id=patient.id)
         )
@@ -380,6 +392,64 @@ async def _apply_patients(
     if accesses:
         await record_accesses(session, AccessAction.CREATE, accesses)
     return ApplyResult(created, updated, skipped, tuple(conflicts))
+
+
+async def _record_consent(
+    session: AsyncSession,
+    *,
+    clinic_id: uuid.UUID,
+    patient_id: uuid.UUID,
+    values: dict[str, Any],
+) -> None:
+    """Store a consent the clinic's export carried, if it carried a whole one.
+
+    All three parts are required together. A purpose with no date is not a
+    consent record under Ley 1581 -- it is a claim that one exists somewhere --
+    and writing it would let the dispatch gate in M4 treat an unproven consent
+    as proven. Partial consent columns are therefore ignored here, while the
+    per-cell rules have already flagged whichever part was unreadable.
+
+    `channel` is `any` because an export says what the patient agreed to, not
+    which app to use; the channel is settled by the verified phone binding.
+    Re-importing the same consent does not duplicate it: one row per patient,
+    purpose and grant date.
+    """
+    purpose = values.get("consent_purpose")
+    granted_at = values.get("consent_granted_at")
+    evidence = values.get("consent_evidence")
+    if not purpose or granted_at is None or not evidence:
+        return
+
+    moment = (
+        granted_at
+        if isinstance(granted_at, dt.datetime)
+        else dt.datetime.combine(granted_at, dt.time.min, tzinfo=BOGOTA)
+    )
+
+    existing = await session.scalar(
+        select(Consent).where(
+            Consent.clinic_id == clinic_id,
+            Consent.patient_id == patient_id,
+            Consent.purpose == purpose,
+            Consent.granted_at == moment,
+        )
+    )
+    if existing is not None:
+        return
+
+    session.add(
+        Consent(
+            clinic_id=clinic_id,
+            patient_id=patient_id,
+            purpose=ConsentPurpose(str(purpose)),
+            channel=ConsentChannel.ANY,
+            granted_at=moment,
+            evidence_kind=EvidenceKind(str(evidence)),
+            # No evidence_ref: the document itself stayed with the clinic. The
+            # evidence_kind says what to go and ask for.
+            policy_version=IMPORTED_POLICY_VERSION,
+        )
+    )
 
 
 def _names(values: dict[str, Any]) -> tuple[str | None, str]:

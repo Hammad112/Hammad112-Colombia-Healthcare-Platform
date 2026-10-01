@@ -18,8 +18,11 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.tenancy import ClinicScope, apply_clinic_scope
+from src.identity.models import Consent, ConsentChannel, ConsentPurpose, EvidenceKind
 from tests.integration.factories import create_graph, scope_client
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "onboarding"
@@ -1251,3 +1254,102 @@ async def test_a_file_can_be_uploaded_from_a_page(scoped: TestClient) -> None:
 
     # And the new import is listed for someone to pick up again.
     assert "from_page.csv" in scoped.get("/onboarding/").text
+
+
+# --------------------------------------------------- consent at import (ADR-19)
+CONSENT_CSV = (
+    b"TIPO DOC;IDENTIFICACION;NOMBRES;APELLIDOS;CELULAR;"
+    b"CONSENTIMIENTO;FECHA CONSENTIMIENTO;EVIDENCIA CONSENTIMIENTO\n"
+    b"CC;1055667788;Marta;Rojas Sanin;3151112233;citas;2026-03-15;escrito\n"
+)
+
+
+async def test_consent_in_the_export_is_recorded_against_the_patient(
+    scoped: TestClient, session: AsyncSession
+) -> None:
+    """Under Ley 1581 health data needs explicit, prior, informed authorization.
+
+    There is no "we provide healthcare" exemption in Colombia, so a patient
+    imported without consent is a patient the bot may not message. The
+    `app.consents` table existed since M0 and nothing mapped to it, which meant a
+    clinic could not bring its consent across.
+    """
+    body = _upload_bytes(scoped, "consent.csv", CONSENT_CSV)
+    session_id = body["session_id"]
+
+    columns = {c["column"]: c["target_field"] for s in body["sheets"] for c in s["columns"]}
+    assert columns["CONSENTIMIENTO"] == "consent_purpose"
+    assert columns["FECHA CONSENTIMIENTO"] == "consent_granted_at"
+    assert columns["EVIDENCIA CONSENTIMIENTO"] == "consent_evidence"
+
+    scoped.post(f"/onboarding/uploads/{session_id}/validate")
+    committed = scoped.post(f"/onboarding/uploads/{session_id}/commit")
+    assert committed.status_code == 200, committed.text
+
+    await apply_clinic_scope(session, ClinicScope(clinic_id=_clinic_of(scoped)))
+    consents = (await session.scalars(select(Consent))).all()
+    assert len(consents) == 1
+    consent = consents[0]
+    assert consent.purpose == ConsentPurpose.APPOINTMENT_MESSAGING
+    assert consent.evidence_kind == EvidenceKind.WRITTEN
+    assert consent.granted_at.date().isoformat() == "2026-03-15"
+    # The channel comes from the verified phone binding, not from a spreadsheet.
+    assert consent.channel == ConsentChannel.ANY
+
+
+async def test_a_partial_consent_column_records_no_consent(
+    scoped: TestClient, session: AsyncSession
+) -> None:
+    """A purpose with no date is a claim that consent exists, not a record of it.
+
+    Storing it would let the dispatch gate in M4 treat an unproven consent as
+    proven, which is the one outcome this must never produce. The patient still
+    imports; only the consent is withheld.
+    """
+    raw = (
+        b"TIPO DOC;IDENTIFICACION;NOMBRES;APELLIDOS;CONSENTIMIENTO\n"
+        b"CC;1066778899;Ana;Perez Gomez;citas\n"
+    )
+    body = _upload_bytes(scoped, "partial.csv", raw)
+    scoped.post(f"/onboarding/uploads/{body['session_id']}/validate")
+    committed = scoped.post(f"/onboarding/uploads/{body['session_id']}/commit")
+    assert committed.status_code == 200, committed.text
+    assert sum(committed.json()["committed"].values()) == 1
+
+    await apply_clinic_scope(session, ClinicScope(clinic_id=_clinic_of(scoped)))
+    assert (await session.scalars(select(Consent))).all() == []
+
+
+async def test_an_unrecognised_consent_purpose_is_never_widened(
+    scoped: TestClient,
+) -> None:
+    """Consent to a reminder is not consent to a wellness check-in.
+
+    Mapping an unknown purpose onto the broadest one would manufacture consent
+    the patient never gave, so the row goes to review instead.
+    """
+    raw = (
+        b"TIPO DOC;IDENTIFICACION;NOMBRES;APELLIDOS;"
+        b"CONSENTIMIENTO;FECHA CONSENTIMIENTO;EVIDENCIA CONSENTIMIENTO\n"
+        b"CC;1077889900;Luis;Gomez Diaz;promociones;2026-03-15;escrito\n"
+    )
+    body = _upload_bytes(scoped, "odd_purpose.csv", raw)
+    scoped.post(f"/onboarding/uploads/{body['session_id']}/validate")
+
+    rows = scoped.get(
+        f"/onboarding/uploads/{body['session_id']}/rows", params={"status": "review"}
+    ).json()
+    assert any("promociones" in reason for row in rows for reason in row["reviews"])
+
+
+async def test_re_importing_the_same_consent_does_not_duplicate_it(
+    scoped: TestClient, session: AsyncSession
+) -> None:
+    """Clinics re-run imports; a consent is not two consents."""
+    for name in ("consent.csv", "consent_again.csv"):
+        body = _upload_bytes(scoped, name, CONSENT_CSV)
+        scoped.post(f"/onboarding/uploads/{body['session_id']}/validate")
+        assert scoped.post(f"/onboarding/uploads/{body['session_id']}/commit").status_code == 200
+
+    await apply_clinic_scope(session, ClinicScope(clinic_id=_clinic_of(scoped)))
+    assert len((await session.scalars(select(Consent))).all()) == 1

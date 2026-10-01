@@ -237,6 +237,85 @@ def phone(raw: str, *, region: str = "CO") -> Outcome[str]:
     )
 
 
+# --------------------------------------------------------------------- consent
+#: How clinics write the purpose a patient agreed to. Anything unrecognised goes
+#: to review rather than being mapped to the broadest purpose: consent to an
+#: appointment reminder is not consent to a wellness check-in.
+_CONSENT_PURPOSES: Final = {
+    "citas": "appointment_messaging",
+    "cita": "appointment_messaging",
+    "recordatorios": "appointment_messaging",
+    "recordatorio de citas": "appointment_messaging",
+    "mensajes de citas": "appointment_messaging",
+    "appointment_messaging": "appointment_messaging",
+    "appointments": "appointment_messaging",
+    "bienestar": "wellness_checkins",
+    "seguimiento": "wellness_checkins",
+    "wellness_checkins": "wellness_checkins",
+    "datos sensibles": "sensitive_data",
+    "sensitive_data": "sensitive_data",
+    "telemedicina": "telemedicine",
+    "telemedicine": "telemedicine",
+}
+
+#: How the consent was obtained. `imported_declaration` is the honest value when
+#: a clinic asserts consent exists without evidence we hold, and it is kept
+#: distinct so a later audit can tell it from a signed form.
+_EVIDENCE_KINDS: Final = {
+    "escrito": "written",
+    "firmado": "written",
+    "formato fisico": "written",
+    "written": "written",
+    "verbal": "verbal_recorded",
+    "telefonico": "verbal_recorded",
+    "grabado": "verbal_recorded",
+    "verbal_recorded": "verbal_recorded",
+    "digital": "digital_form",
+    "formulario": "digital_form",
+    "web": "digital_form",
+    "digital_form": "digital_form",
+    "declaracion": "imported_declaration",
+    "declarado": "imported_declaration",
+    "imported_declaration": "imported_declaration",
+}
+
+
+def consent_purpose(raw: str) -> Outcome[str]:
+    """What the patient agreed to receive.
+
+    An unrecognised purpose is never widened to cover more than it says: that
+    would manufacture consent the patient did not give.
+    """
+    text = strip_accents(raw.strip()).casefold()
+    if not text:
+        return _review("consent.purpose_empty", "No consent purpose given.")
+    found = _CONSENT_PURPOSES.get(text)
+    if found is None:
+        return _review(
+            "consent.purpose_unknown",
+            f"{raw!r} is not a consent purpose this system recognises. Confirm which "
+            f"of appointment messaging, wellness check-ins, sensitive data or "
+            f"telemedicine it means.",
+        )
+    return _valid(found, "consent.purpose")
+
+
+def consent_evidence(raw: str) -> Outcome[str]:
+    """How the consent was obtained."""
+    text = strip_accents(raw.strip()).casefold()
+    if not text:
+        return _review("consent.evidence_empty", "No consent evidence given.")
+    found = _EVIDENCE_KINDS.get(text)
+    if found is None:
+        return _review(
+            "consent.evidence_unknown",
+            f"{raw!r} is not a kind of consent evidence this system recognises. "
+            f"Confirm whether it was written, verbal and recorded, a digital form, "
+            f"or the clinic declaring it on import.",
+        )
+    return _valid(found, "consent.evidence")
+
+
 # ------------------------------------------------------------------ boolean-ish
 _TRUE: Final = frozenset({"si", "s", "yes", "y", "true", "1", "x", "verdadero"})
 _FALSE: Final = frozenset({"no", "n", "false", "0", "falso"})

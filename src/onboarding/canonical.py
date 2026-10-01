@@ -232,6 +232,58 @@ _PATIENT: Final = (
         ),
         examples=("Sura", "Nueva EPS", "Coosalud"),
     ),
+    # ---- consent (ADR-19). Optional because not every clinic can export it;
+    # what makes it safe is that an unrecognised value is refused rather than
+    # widened, and a consent date that cannot be read refuses the row.
+    Field(
+        "consent_purpose",
+        Entity.PATIENT,
+        Requirement.OPTIONAL,
+        "What the patient agreed to be contacted about.",
+        aliases=(
+            "consentimiento",
+            "proposito consentimiento",
+            "finalidad",
+            "autorizacion para",
+            "tipo de consentimiento",
+            "consent purpose",
+            "consent",
+        ),
+        normalizer="consent_purpose",
+        examples=("citas", "telemedicina"),
+    ),
+    Field(
+        "consent_granted_at",
+        Entity.PATIENT,
+        Requirement.OPTIONAL,
+        "The date the patient gave that consent.",
+        aliases=(
+            "fecha consentimiento",
+            "fecha autorizacion",
+            "fecha de autorizacion",
+            "consentimiento fecha",
+            "consent date",
+            "consent granted at",
+        ),
+        normalizer="date",
+        examples=("2026-03-15",),
+    ),
+    Field(
+        "consent_evidence",
+        Entity.PATIENT,
+        Requirement.OPTIONAL,
+        "How the consent was obtained: written, verbal and recorded, a digital "
+        "form, or declared by the clinic on import.",
+        aliases=(
+            "evidencia consentimiento",
+            "medio consentimiento",
+            "como se obtuvo",
+            "soporte",
+            "consent evidence",
+        ),
+        normalizer="consent_evidence",
+        examples=("escrito", "digital"),
+    ),
     Field(
         "secondary_contact_name",
         Entity.PATIENT,

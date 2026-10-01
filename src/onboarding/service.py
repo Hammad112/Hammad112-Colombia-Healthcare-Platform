@@ -405,6 +405,10 @@ def _apply(canonical: Field, raw: str, order: norm.DayFirst) -> norm.Outcome[Any
             return norm.split_full_name(raw)
         case "boolean":
             return norm.boolean(raw)
+        case "consent_purpose":
+            return norm.consent_purpose(raw)
+        case "consent_evidence":
+            return norm.consent_evidence(raw)
         case _:
             # No normalizer: the value is stored as written, trimmed. An empty
             # optional field is not an error.
