@@ -19,9 +19,11 @@ whole parse in a process that can be killed.
 
 from __future__ import annotations
 
+import codecs
 import csv
 import io
 import zipfile
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
@@ -42,10 +44,28 @@ MAX_UNCOMPRESSED_BYTES: Final = 512 * 1024 * 1024
 MAX_COMPRESSION_RATIO: Final = 200
 MAX_ARCHIVE_MEMBERS: Final = 2_000
 
+# One CSV field. The stdlib default of 128 KiB is smaller than a pasted clinical
+# note, and a field that long is unusual but not an attack: the whole file is
+# already bounded by the upload limit.
+MAX_CSV_FIELD_BYTES: Final = 8 * 1024 * 1024
+
 # Encoding ladder, strictest first. A probabilistic detector is deliberately not
 # used: guessing wrong corrupts every accented name in the file, and Spanish
 # clinic data is nothing but accented names.
 ENCODING_LADDER: Final = ("utf-8-sig", "utf-8", "cp1252", "latin-1")
+
+# Byte-order marks that identify an encoding outright. These are checked before
+# the ladder because `cp1252` and `latin-1` decode UTF-16 bytes "successfully"
+# into text full of NUL characters: the ladder cannot fail its way past them, so
+# a UTF-16 file would be read as mojibake and imported as garbage. Excel writes
+# UTF-16LE whenever a user picks "Unicode Text (*.txt)".
+_BOMS: Final = (
+    (codecs.BOM_UTF8, "utf-8-sig"),
+    (codecs.BOM_UTF32_LE, "utf-32"),
+    (codecs.BOM_UTF32_BE, "utf-32"),
+    (codecs.BOM_UTF16_LE, "utf-16"),
+    (codecs.BOM_UTF16_BE, "utf-16"),
+)
 
 # Delimiters Excel actually writes. Semicolon is the default in Spanish locales,
 # where the comma is the decimal separator.
@@ -60,6 +80,31 @@ SINGLE_COLUMN: Final = chr(30)
 
 class UnreadableFile(Exception):
     """The file cannot be read safely, or cannot be read without guessing."""
+
+
+@dataclass(frozen=True, slots=True)
+class StructureQuestion:
+    """Something about the file's shape that the file cannot settle by itself.
+
+    A warning tells a reviewer what happened. A question asks them what should
+    happen, and nothing is imported until they answer. The difference is whether
+    a wrong choice loses data: reading a title line as a header loses every
+    patient in the file, so it is a question, while a Windows-1252 encoding is
+    reported and read.
+
+    `applied_if_approved` is what we do on approval. Declining always means the
+    reading we would have used anyway, so declining is never destructive, and a
+    reviewer who does not understand the question is safe either way.
+    """
+
+    #: Stable identifier, so an answer survives a re-read of the same file.
+    id: str
+    #: What was found, in a receptionist's terms.
+    finding: str
+    #: What approving does.
+    applied_if_approved: str
+    #: What declining does.
+    applied_if_declined: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +123,8 @@ class Sheet:
     hidden_columns: tuple[str, ...] = ()
     #: Findings a human should see before confirming the mapping.
     warnings: tuple[str, ...] = ()
+    #: Findings a human must decide before anything is imported.
+    questions: tuple[StructureQuestion, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +133,11 @@ class ReadResult:
     encoding: str | None = None
     delimiter: str | None = None
     warnings: tuple[str, ...] = field(default=())
+
+    @property
+    def questions(self) -> tuple[StructureQuestion, ...]:
+        """Every sheet's structure questions, in order."""
+        return tuple(q for sheet in self.sheets for q in sheet.questions)
 
 
 # --------------------------------------------------------------------- guards
@@ -156,7 +208,22 @@ def decode(raw: bytes) -> tuple[str, str]:
     Returns the text and the encoding used. `latin-1` cannot fail, so it is the
     floor rather than a real detection; when it is reached the caller is warned,
     because a wrong decoding shows up as mojibake in a patient's name.
+
+    A byte-order mark is trusted over the ladder. UTF-32's mark begins with
+    UTF-16LE's, so the wider marks are tested first.
     """
+    for mark, encoding in _BOMS:
+        if raw.startswith(mark):
+            try:
+                # `utf-16`/`utf-32` consume the mark themselves and pick the
+                # byte order from it, so the prefix is not stripped by hand.
+                return raw.decode(encoding), encoding
+            except UnicodeDecodeError as error:
+                raise UnreadableFile(
+                    f"File begins with a {encoding} byte-order mark but is not valid "
+                    f"{encoding} ({error.reason})."
+                ) from error
+
     for encoding in ENCODING_LADDER:
         try:
             return raw.decode(encoding), encoding
@@ -208,12 +275,64 @@ def sniff_delimiter(sample: str) -> str:
     return max(scored)[2]
 
 
-def read_csv(path: Path) -> ReadResult:
+def _csv_rows(text: str, delimiter: str) -> list[list[str]]:
+    """Parse with a field-size limit wide enough for a pasted clinical note.
+
+    `csv` refuses a field over 128 KiB, and a receptionist pasting a long note
+    into one cell is enough to hit it. The limit is raised for this parse only
+    and restored afterwards, because it is process-global state and leaving it
+    raised would weaken the guard for every other caller.
+    """
+    previous = csv.field_size_limit()
+    csv.field_size_limit(MAX_CSV_FIELD_BYTES)
+    try:
+        return list(csv.reader(io.StringIO(text), delimiter=delimiter))
+    finally:
+        csv.field_size_limit(previous)
+
+
+def _find_csv_header(rows: list[tuple[str, ...]]) -> int:
+    """Index of the row that most looks like column labels, within the first few.
+
+    A hand-kept CSV often opens with a clinic name or a date, and taking row 1 on
+    faith reads that title as the only column and every real row as ragged. The
+    same scorer the Excel reader uses decides it, so the two agree.
+
+    Rows are only considered while they could plausibly be a preamble: a header
+    twenty rows down is a different problem, and guessing there would be worse
+    than asking.
+    """
+    best, best_score = 0, -1.0
+    for index, row in enumerate(rows[:10]):
+        score = _header_score(list(row))
+        # Ties go to the earlier row: with two plausible headers the first table
+        # is the one the file is about.
+        if score > best_score:
+            best, best_score = index, score
+    return best
+
+
+def read_csv(path: Path, answers: Mapping[str, bool] | None = None) -> ReadResult:
+    """Read a delimited file.
+
+    `answers` carries the reviewer's decisions on this file's structure
+    questions, keyed by question id. An unanswered question is still asked and
+    the declined (non-destructive) reading is used meanwhile, so a file is always
+    readable and never silently altered.
+    """
     raw = path.read_bytes()
     if raw[:2] == b"MZ":
         raise UnreadableFile("File is an executable, not a spreadsheet.")
 
     text, encoding = decode(raw)
+
+    # Classic Mac exports end lines with a bare CR, which `csv` treats as a
+    # newline inside an unquoted field and refuses with an opaque error. There
+    # is nothing to decide here: a CR that is not part of CRLF is a line ending,
+    # so it is normalised rather than reported.
+    if "\r" in text:
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+
     warnings: list[str] = []
     if encoding == "latin-1":
         warnings.append("Encoding could not be determined; read as latin-1. Check accented names.")
@@ -221,24 +340,128 @@ def read_csv(path: Path) -> ReadResult:
         warnings.append("Read as Windows-1252 (a Spanish Excel export). Check accented names.")
 
     delimiter = sniff_delimiter(text[:64_000])
-    rows = [
-        tuple(cell.strip() for cell in row)
-        for row in csv.reader(io.StringIO(text), delimiter=delimiter)
+    try:
+        rows = [tuple(cell.strip() for cell in row) for row in _csv_rows(text, delimiter)]
+    except csv.Error as error:
+        # Every csv.Error we can predict is handled above, so reaching here means
+        # the file is malformed in a way we have not seen. It is reported as
+        # unreadable rather than escaping as a 500.
+        raise UnreadableFile(f"File is not valid CSV: {error}") from error
+    # Blank lines are dropped, but the line each surviving row came from is kept:
+    # a row number is how a refusal points a receptionist at the line to fix, and
+    # it is what `excluded_rows` names, so it has to mean the line in their file.
+    numbered = [
+        (number, row) for number, row in enumerate(rows, start=1) if any(cell for cell in row)
     ]
-    rows = [row for row in rows if any(cell for cell in row)]
-    if not rows:
+    if not numbered:
         raise UnreadableFile("File contains no rows.")
+    line_numbers = [number for number, _ in numbered]
+    rows = [row for _, row in numbered]
 
-    headers = rows[0]
+    questions: list[StructureQuestion] = []
+
+    # A preamble line above the table: taking row 1 on faith would read a clinic
+    # name as the only column and lose every patient. Which row is the header is
+    # a judgement, so it is asked rather than assumed.
+    decided = dict(answers or {})
+    detected_header = _find_csv_header(rows)
+    # Declining means row 1, which is the file as written.
+    header_index = detected_header if decided.get("csv.header_row") else 0
+    if detected_header > 0:
+        questions.append(
+            StructureQuestion(
+                id="csv.header_row",
+                finding=(
+                    f"The file opens with {detected_header} line(s) above the table: "
+                    f"{rows[0][0][:60]!r}. Row {detected_header + 1} looks like the "
+                    f"column headings."
+                ),
+                applied_if_approved=(
+                    f"Use row {detected_header + 1} as the headings and ignore the line(s) above it."
+                ),
+                applied_if_declined="Use row 1 as the headings, exactly as the file has it.",
+            )
+        )
+
+    headers = rows[header_index]
     width = len(headers)
+
+    # Two columns with one name: whichever is mapped, the other silently loses.
+    duplicated = sorted({h for h in headers if h and headers.count(h) > 1})
+    if duplicated and decided.get("csv.duplicate_headers"):
+        # Numbered so each repeat can be mapped or skipped on its own. The first
+        # keeps its name, so a mapping confirmed before the rename still applies.
+        counts: dict[str, int] = {}
+        renamed: list[str] = []
+        for header in headers:
+            if header and headers.count(header) > 1:
+                counts[header] = counts.get(header, 0) + 1
+                renamed.append(header if counts[header] == 1 else f"{header} ({counts[header]})")
+            else:
+                renamed.append(header)
+        headers = tuple(renamed)
+    if duplicated:
+        questions.append(
+            StructureQuestion(
+                id="csv.duplicate_headers",
+                finding=(
+                    f"More than one column is called {duplicated!r}. Only one of each "
+                    f"can be imported; the other would be silently ignored."
+                ),
+                applied_if_approved=(
+                    "Number the repeats (NOMBRE, NOMBRE (2)) so each column can be "
+                    "mapped or skipped on its own."
+                ),
+                applied_if_declined="Leave the names as they are and import the first of each.",
+            )
+        )
+
+    # A title line above the table makes the header one column wide, so every
+    # real row then looks overlong. Asking about both at once would show a
+    # second, misleading question ("an unquoted delimiter") for a cause the
+    # first question already covers. The header question is asked alone, and
+    # once it is answered any rows still overlong are asked about then.
+    header_question_pending = detected_header > 0 and "csv.header_row" not in decided
+
     body: list[tuple[str, ...]] = []
-    for number, row in enumerate(rows[1:], start=2):
+    overlong: list[int] = []
+    # Declining leaves the row out entirely rather than cutting cells off it.
+    keep_overlong = bool(decided.get("csv.overlong_rows"))
+    for number, row in zip(line_numbers[header_index + 1 :], rows[header_index + 1 :], strict=True):
+        if len(row) > width:
+            overlong.append(number)
+            if not keep_overlong:
+                if not header_question_pending:
+                    warnings.append(
+                        f"Row {number} has {len(row)} fields, expected {width}; "
+                        f"left out until the extra fields are confirmed."
+                    )
+                continue
         if len(row) != width:
-            # Ragged rows are padded rather than dropped, and reported: a row
-            # with a missing trailing field is usually still a real patient.
-            warnings.append(f"Row {number} has {len(row)} fields, expected {width}.")
+            if not header_question_pending:
+                warnings.append(f"Row {number} has {len(row)} fields, expected {width}.")
             row = row[:width] + ("",) * max(0, width - len(row))
         body.append(row)
+
+    if overlong and not header_question_pending:
+        shown = ", ".join(str(n) for n in overlong[:5])
+        more = f" and {len(overlong) - 5} more" if len(overlong) > 5 else ""
+        questions.append(
+            StructureQuestion(
+                id="csv.overlong_rows",
+                finding=(
+                    f"Row(s) {shown}{more} have more fields than there are headings. "
+                    f"The extra values have nowhere to go, which usually means an "
+                    f"unquoted {delimiter!r} inside a value."
+                ),
+                applied_if_approved=(
+                    "Drop the extra fields past the last heading and import the rest of those rows."
+                ),
+                applied_if_declined=(
+                    "Leave those rows out of the import so nothing is silently cut."
+                ),
+            )
+        )
 
     return ReadResult(
         sheets=(
@@ -246,8 +469,9 @@ def read_csv(path: Path) -> ReadResult:
                 name=path.stem,
                 headers=headers,
                 rows=tuple(body),
-                header_row=1,
+                header_row=line_numbers[header_index],
                 warnings=tuple(warnings),
+                questions=tuple(questions),
             ),
         ),
         encoding=encoding,
@@ -481,11 +705,15 @@ def read_excel(path: Path) -> ReadResult:
         workbook.close()
 
 
-def read(path: Path) -> ReadResult:
-    """Read any supported file into sheets of strings, or refuse it."""
+def read(path: Path, answers: Mapping[str, bool] | None = None) -> ReadResult:
+    """Read any supported file into sheets of strings, or refuse it.
+
+    `answers` resolves the structure questions a previous read raised, keyed by
+    question id: True applies the fix, False keeps the file as written.
+    """
     kind = detect_kind(path)
     if kind == "csv":
-        return read_csv(path)
+        return read_csv(path, answers)
     if kind == "xls":
         raise UnreadableFile(
             "Legacy .xls is not supported. Save the file as .xlsx and upload it again."

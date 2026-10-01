@@ -87,6 +87,20 @@ class SheetOut(BaseModel):
         )
 
 
+class StructureQuestionOut(BaseModel):
+    """One thing about the file's shape that a reviewer must decide."""
+
+    id: str
+    sheet: str
+    finding: str
+    if_approved: str
+    if_declined: str
+    answered: bool | None = Field(
+        default=None,
+        description="True approved, False declined, null not yet answered.",
+    )
+
+
 class UploadOut(BaseModel):
     session_id: uuid.UUID
     filename: str
@@ -94,6 +108,11 @@ class UploadOut(BaseModel):
     encoding: str | None = None
     delimiter: str | None = None
     sheets: list[SheetOut]
+    structure_questions: list[StructureQuestionOut] = Field(
+        default_factory=list,
+        description="Things about the file's shape that must be approved or declined "
+        "before the import can be trusted. Declining reads the file as written.",
+    )
     status: str
     reused_profiles: list[str] = Field(
         default_factory=list,
@@ -173,6 +192,18 @@ class ProfileOut(BaseModel):
     mapping: dict[str, str]
     version: int = Field(description="Incremented each time a reviewer changes it.")
     updated_at: datetime
+
+
+class StructureAnswerIn(BaseModel):
+    """Approve or decline one structure question.
+
+    Approving applies the fix the question describes. Declining discards that
+    one finding and reads the file as written, leaving every other question and
+    every other row untouched.
+    """
+
+    id: str
+    approved: bool
 
 
 class CorrectionIn(BaseModel):

@@ -38,6 +38,8 @@ from src.api.onboarding.schemas import (
     ProfileOut,
     RowOut,
     SheetOut,
+    StructureAnswerIn,
+    StructureQuestionOut,
     UploadOut,
     ValidationOut,
 )
@@ -56,6 +58,11 @@ MAX_UPLOAD_BYTES: Final = 50 * 1024 * 1024
 #: database — only the sheets already read, so the reviewer's next request does
 #: not need the original upload again.
 _PARSED: dict[uuid.UUID, ReadResult] = {}
+
+#: The uploaded file on disk, by session id. Kept so a structure question can be
+#: answered and the file re-read with that answer applied: the answer changes how
+#: the bytes are interpreted, so it cannot be applied to an already-parsed table.
+_SOURCE: dict[uuid.UUID, Path] = {}
 
 
 async def _load(
@@ -141,6 +148,7 @@ async def upload(
     target = Path(tempfile.mkdtemp()) / (file.filename or "upload")
     digest = hashlib.sha256()
     written = 0
+    keep_upload = False
     try:
         with target.open("wb") as handle:
             while chunk := await file.read(1024 * 1024):
@@ -203,6 +211,9 @@ async def upload(
         record.total_rows = sum(r.total_rows for r in reports)
         await db.flush()
         _PARSED[record.id] = result
+        if any(sheet.questions for sheet in result.sheets):
+            _SOURCE[record.id] = target
+            keep_upload = True
 
         return UploadOut(
             session_id=record.id,
@@ -211,12 +222,18 @@ async def upload(
             encoding=result.encoding,
             delimiter=result.delimiter,
             sheets=[SheetOut.build(r) for r in reports],
+            structure_questions=_structure_questions(result, {}),
             status=record.status,
             reused_profiles=reused,
             duplicate_of=previous.id if previous else None,
         )
     finally:
-        shutil.rmtree(target.parent, ignore_errors=True)
+        # Deleted unless a structure question is outstanding, because answering
+        # one re-reads the bytes. `keep_upload` is only ever set on the success
+        # path, so a refused or oversized upload still deletes: leaving patient
+        # data on disk for a file nobody can act on would be a slow leak.
+        if not keep_upload:
+            shutil.rmtree(target.parent, ignore_errors=True)
 
 
 @router.get(
@@ -234,10 +251,146 @@ async def get_upload(db: SessionDep, session_id: uuid.UUID, scope: ClinicScopeDe
         encoding=parsed.encoding,
         delimiter=parsed.delimiter,
         sheets=[SheetOut.build(r) for r in _reports(record)],
+        # Read from the parsed file rather than the stored report: a question is
+        # a property of how the bytes read, and answering one can raise the next
+        # one (declining the header row exposes the rows it would have fixed).
+        structure_questions=_structure_questions(parsed, _structure_answers(record)),
         status=record.status,
         reused_profiles=list(stored.get("reused_profiles", [])),
         duplicate_of=uuid.UUID(stored["duplicate_of"]) if stored.get("duplicate_of") else None,
     )
+
+
+async def _known_references(
+    db: SessionDep,
+    *,
+    clinic_id: uuid.UUID,
+    converted: list[tuple[service.SheetReport, list[service.RowResult]]],
+) -> dict[str, set[str]]:
+    """What a reference in this import is allowed to name.
+
+    Two sources, because either one alone gives a wrong answer: the other sheets
+    of the same workbook (a doctor defined in this import), and what the clinic
+    already holds (a doctor imported last month). Checking only the file would
+    reject every appointment on a repeat import; checking only the database would
+    reject a workbook that defines its own doctors.
+    """
+    doctors: set[str] = set()
+    patients: set[str] = set()
+
+    for report, rows in converted:
+        for row in rows:
+            if report.entity is Entity.DOCTOR:
+                for field_name in ("external_ref", "full_name"):
+                    value = str(row.values.get(field_name, "")).strip()
+                    if value:
+                        doctors.add(value.casefold())
+            elif report.entity is Entity.PATIENT:
+                number = str(row.values.get("document_number", "")).strip()
+                if number:
+                    patients.add(number.casefold())
+
+    for doctor in await repository.doctor_reference_values(db, clinic_id=clinic_id):
+        doctors.add(doctor.casefold())
+
+    return {"doctor_ref": doctors, "patient_document": patients}
+
+
+def _structure_questions(
+    parsed: ReadResult, answered: dict[str, bool]
+) -> list[StructureQuestionOut]:
+    """Every structure question the current read raises, with its answer."""
+    return [
+        StructureQuestionOut(
+            id=question.id,
+            sheet=sheet.name,
+            finding=question.finding,
+            if_approved=question.applied_if_approved,
+            if_declined=question.applied_if_declined,
+            answered=answered.get(question.id),
+        )
+        for sheet in parsed.sheets
+        for question in sheet.questions
+    ]
+
+
+def _structure_answers(record: Any) -> dict[str, bool]:
+    return {str(k): bool(v) for k, v in (record.report or {}).get("structure", {}).items()}
+
+
+@router.post(
+    "/uploads/{session_id}/structure",
+    response_model=UploadOut,
+    summary="Approve or decline something about the file's shape",
+)
+async def answer_structure(
+    db: SessionDep, session_id: uuid.UUID, scope: ClinicScopeDep, body: StructureAnswerIn
+) -> UploadOut:
+    """Answer one structure question, then re-read the file under that answer.
+
+    These questions are about how the bytes are read — which row holds the
+    headings, whether a row with too many fields is cut or left out — so an
+    answer cannot be applied to a table that has already been parsed. The file
+    is read again with every answer so far, and the mapping is re-proposed
+    against whatever headings that produces.
+
+    Declining is always the reading the importer would have used anyway, so a
+    declined question discards that one finding and changes nothing else.
+    """
+    record, _ = await _load(db, session_id, scope.clinic_id)
+    if record.status == "committed":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This import was already committed.")
+
+    source = _SOURCE.get(session_id)
+    if source is None or not source.exists():
+        raise HTTPException(
+            status.HTTP_410_GONE,
+            "The uploaded file is no longer on disk, which happens after a restart. "
+            "Upload it again to continue.",
+        )
+
+    known = {q.id for sheet in _PARSED[session_id].sheets for q in sheet.questions}
+    if body.id not in known:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"{body.id!r} is not a question about this file. Open the file to see "
+            f"which questions it raises.",
+        )
+
+    answers = _structure_answers(record)
+    answers[body.id] = body.approved
+
+    try:
+        result = read(source, answers)
+    except UnreadableFile as error:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
+
+    _PARSED[session_id] = result
+    if not any(sheet.questions for sheet in result.sheets):
+        # Nothing left to ask, so the upload itself is no longer needed.
+        shutil.rmtree(source.parent, ignore_errors=True)
+        _SOURCE.pop(session_id, None)
+
+    # The headings may be different ones now, so the mapping is proposed afresh
+    # rather than carried across from a table that no longer exists.
+    reports = list(service.analyse(result))
+    mappings = {r.sheet: _default_mapping(r) for r in reports}
+    stored = dict(record.report or {})
+    _store_reports(
+        record,
+        reports,
+        mappings=mappings,
+        decisions={},
+        structure=answers,
+        reused_profiles=stored.get("reused_profiles", []),
+        duplicate_of=stored.get("duplicate_of"),
+    )
+    record.total_rows = sum(r.total_rows for r in reports)
+    # Validation ran against the old reading, so its verdict no longer applies.
+    record.status = "mapped"
+    record.valid_rows = record.review_rows = record.invalid_rows = 0
+    await db.flush()
+    return await get_upload(db, session_id, scope)
 
 
 @router.put(
@@ -405,6 +558,11 @@ async def validate(db: SessionDep, session_id: uuid.UUID, scope: ClinicScopeDep)
     blocking: list[str] = []
     totals = {"valid": 0, "review": 0, "invalid": 0}
 
+    # Converted rows per sheet, kept so the cross-row checks can run once every
+    # sheet has been converted: a reference may point at a doctor defined on
+    # another sheet of the same workbook, so neither check can be done per sheet.
+    converted: list[tuple[service.SheetReport, list[service.RowResult]]] = []
+
     for report in reports:
         sheet = next(s for s in parsed.sheets if s.name == report.sheet)
         if report.sheet in skipped_sheets:
@@ -429,6 +587,7 @@ async def validate(db: SessionDep, session_id: uuid.UUID, scope: ClinicScopeDep)
             entity=report.entity,
             rows=rows,
         )
+        converted.append((report, rows))
         summary = service.summarise(rows, report, columns)
         summaries.append(summary)
         totals["valid"] += summary.valid_rows
@@ -445,6 +604,33 @@ async def validate(db: SessionDep, session_id: uuid.UUID, scope: ClinicScopeDep)
             )
         if summary.questions:
             blocking.append(f"{summary.sheet}: {len(summary.questions)} question(s) unanswered.")
+
+    # ---- duplicates, and references that point at nothing (scope: validation)
+    # Both are properties of the file as a whole, so they run once every sheet
+    # has been converted rather than inside the per-sheet loop.
+    known = await _known_references(db, clinic_id=scope.clinic_id, converted=converted)
+    for report, rows in converted:
+        duplicates = service.find_duplicates(rows, report.entity)
+        dangling = service.find_dangling_references(rows, report.entity, known=known)
+
+        for row_number, reason in sorted(duplicates.items()):
+            blocking.append(f"{report.sheet} row {row_number}: {reason}.")
+        for row_number, reason in sorted(dangling.items()):
+            blocking.append(f"{report.sheet} row {row_number}: {reason}.")
+
+    # A question about the file's shape decides which rows and headings exist at
+    # all, so leaving one unanswered would commit a reading nobody confirmed.
+    answered = _structure_answers(record)
+    unanswered = [
+        question.id
+        for sheet in parsed.sheets
+        for question in sheet.questions
+        if question.id not in answered
+    ]
+    for question_id in unanswered:
+        blocking.append(
+            f"{question_id}: approve or decline how this file is read before importing it."
+        )
 
     if not summaries:
         blocking.append("No sheet has a confirmed mapping, so there is nothing to import.")

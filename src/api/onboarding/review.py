@@ -262,6 +262,31 @@ async def review_screen(
     stored = record.report or {}
     reports = [service.report_from_dict(s) for s in stored.get("sheets", [])]
     sections = "".join(_sheet_section(r, session_id, scope.clinic_id) for r in reports)
+
+    from src.api.onboarding.routes import _PARSED, _structure_answers
+
+    answered = _structure_answers(record)
+    parsed = _PARSED.get(session_id)
+    structure = "".join(
+        f'<div class="card {"warn" if question.id not in answered else ""}">'
+        f"<strong>How this file is read</strong>"
+        f"<p>{_escape(question.finding)}</p>"
+        f'<form method="post" action="/onboarding/uploads/{session_id}'
+        f'/review/structure?clinic_id={scope.clinic_id}">'
+        f'<input type="hidden" name="id" value="{_escape(question.id)}">'
+        f'<button name="approved" value="yes">{_escape(question.applied_if_approved)}</button> '
+        f'<button class="secondary" name="approved" value="no">'
+        f"{_escape(question.applied_if_declined)}</button>"
+        f"</form>"
+        + (
+            f'<p class="note">Answered: {"applied" if answered[question.id] else "declined"}.</p>'
+            if question.id in answered
+            else ""
+        )
+        + "</div>"
+        for sheet in (parsed.sheets if parsed else ())
+        for question in sheet.questions
+    )
     needing_answers = _review_rows(
         await repository.staged_rows(
             db,
@@ -318,7 +343,7 @@ async def review_screen(
   <h1>Confirm this import</h1>
   <p class="sub"><code>{_escape(record.filename)}</code> · status
      <strong>{_escape(record.status)}</strong></p>
-  {duplicate}{banner}{reused_note}
+  {duplicate}{banner}{reused_note}{structure}
   {sections}
   {needing_answers}
   <h2>When the mapping is right</h2>
@@ -335,6 +360,27 @@ async def review_screen(
     never written. Nothing is imported until you press Import.
   </p>
 </main></body></html>""")
+
+
+@router.post("/uploads/{session_id}/review/structure", include_in_schema=False)
+async def review_structure(
+    db: SessionDep, session_id: uuid.UUID, scope: ClinicScopeDep, request: Request
+) -> RedirectResponse:
+    """Approve or decline one structure question from the screen."""
+    from src.api.onboarding.routes import answer_structure
+    from src.api.onboarding.schemas import StructureAnswerIn
+
+    form = await request.form()
+    question_id = str(form.get("id") or "")
+    approved = str(form.get("approved") or "") == "yes"
+    if question_id:
+        await answer_structure(
+            db, session_id, scope, StructureAnswerIn(id=question_id, approved=approved)
+        )
+    return RedirectResponse(
+        f"/onboarding/uploads/{session_id}/review?clinic_id={scope.clinic_id}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
 
 
 @router.post("/uploads/{session_id}/review/validate", include_in_schema=False)

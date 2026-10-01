@@ -450,6 +450,21 @@ async def _apply_specialties(
     return ApplyResult(created, updated, skipped)
 
 
+async def doctor_reference_values(session: AsyncSession, *, clinic_id: uuid.UUID) -> set[str]:
+    """Every way an appointment could name a doctor this clinic already has.
+
+    Both the clinic's own code and the doctor's name, because a file may use
+    either. Doctors are not patient data, so no audit entry is recorded: this
+    returns no identifiers and discloses nothing about a patient.
+    """
+    rows = (
+        await session.execute(
+            select(Doctor.external_ref, Doctor.full_name).where(Doctor.clinic_id == clinic_id)
+        )
+    ).all()
+    return {value for row in rows for value in row if value}
+
+
 async def _apply_doctors(
     session: AsyncSession, *, clinic_id: uuid.UUID, rows: list[RowResult]
 ) -> ApplyResult:

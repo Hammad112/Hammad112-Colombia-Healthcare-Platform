@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import datetime as dt
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Final
 
 from src.core.config import get_settings
 from src.onboarding import normalizers as norm
@@ -328,8 +329,6 @@ def validate(
             canonical = field_for(entity, target)
             if canonical is None:
                 continue
-            # The reviewer's answer, where they gave one, so the correction is
-            # what gets converted rather than only what gets displayed.
             original = raw_row[index[column]]
             # The reviewer's answer, where they gave one, so the correction is
             # what gets converted rather than only what gets displayed.
@@ -421,6 +420,93 @@ def _text(value: Any) -> str | None:
     if isinstance(value, dt.date | dt.time):
         return value.isoformat()
     return str(value)
+
+
+#: What makes two rows the same record, per entity. Patient identity is the
+#: document pair because that is what `_apply_patients` matches on: keying
+#: duplicate detection on anything else would report rows as distinct that the
+#: database then merges, or the reverse.
+#: Fields that name a record defined elsewhere, and what to call them in a
+#: refusal. Appointments are the only entity with references today; availability
+#: joins here when M2 computes it.
+REFERENCE_FIELDS: Final[dict[Entity, tuple[tuple[str, str], ...]]] = {
+    Entity.APPOINTMENT: (
+        ("doctor_ref", "the doctor"),
+        ("patient_document", "the patient document"),
+    ),
+    Entity.AVAILABILITY: (("doctor_ref", "the doctor"),),
+}
+
+IDENTITY_FIELDS: Final[dict[Entity, tuple[str, ...]]] = {
+    # What `_apply_patients` matches on.
+    Entity.PATIENT: ("document_type", "document_number"),
+    # A doctor has no document column in the canonical schema, so the clinic's
+    # own code identifies them where there is one, and the name otherwise.
+    Entity.DOCTOR: ("external_ref",),
+    Entity.SPECIALTY: ("name",),
+}
+
+
+def find_duplicates(rows: list[RowResult], entity: Entity) -> dict[int, str]:
+    """Row numbers that repeat an identity already seen in this file.
+
+    Returned per row rather than as a count, so the message can name the row the
+    duplicate collides with — "the same cédula as row 14" is actionable, while
+    "3 duplicates" sends a receptionist hunting.
+
+    The first occurrence is not a duplicate: it is the record, and the later ones
+    are the repeats. Rows missing part of the identity are skipped, because an
+    empty cédula is already a per-cell refusal and reporting it twice would make
+    the screen noisier without telling anyone anything new.
+    """
+    fields = IDENTITY_FIELDS.get(entity)
+    if not fields:
+        return {}
+
+    first_seen: dict[tuple[str, ...], int] = {}
+    duplicates: dict[int, str] = {}
+    for row in rows:
+        key = tuple(str(row.values.get(f, "")).strip().casefold() for f in fields)
+        if not all(key):
+            continue
+        if key in first_seen:
+            shown = " ".join(k for k in key if k)
+            duplicates[row.row_number] = (
+                f"the same {' and '.join(fields).replace('_', ' ')} as row "
+                f"{first_seen[key]} ({shown})"
+            )
+            continue
+        first_seen[key] = row.row_number
+    return duplicates
+
+
+def find_dangling_references(
+    rows: list[RowResult], entity: Entity, *, known: Mapping[str, set[str]]
+) -> dict[int, str]:
+    """Row numbers whose reference points at something the import does not have.
+
+    A sheet of appointments naming a doctor the file never defines would import
+    as an appointment with nobody attending it. `known` carries the values each
+    referenced field actually has, gathered from the other sheets in the same
+    file plus what the clinic already holds, so a doctor already in the database
+    is not reported as missing.
+    """
+    checks = REFERENCE_FIELDS.get(entity, ())
+    if not checks:
+        return {}
+
+    dangling: dict[int, str] = {}
+    for row in rows:
+        for field_name, label in checks:
+            value = str(row.values.get(field_name, "")).strip()
+            if not value:
+                continue  # an absent reference is a per-cell concern, not this one
+            if value.casefold() not in known.get(field_name, set()):
+                dangling[row.row_number] = (
+                    f"{label} {value!r} is not in this file and not already in the clinic's records"
+                )
+                break
+    return dangling
 
 
 def summarise(

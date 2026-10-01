@@ -945,3 +945,282 @@ async def test_an_untouched_cell_is_not_marked_as_corrected(scoped: TestClient) 
     entries = scoped.get(f"/onboarding/uploads/{body['session_id']}/transform-log").json()
     assert entries
     assert all(e["corrected_from_review"] is None for e in entries)
+
+
+# ------------------------------------- the file's shape, confirmed by a person
+def _upload_bytes(client: TestClient, name: str, raw: bytes) -> dict:  # type: ignore[type-arg]
+    response = client.post("/onboarding/uploads", files={"file": (name, raw)})
+    assert response.status_code == 201, response.text
+    return response.json()  # type: ignore[no-any-return]
+
+
+PREAMBLE_CSV = (
+    b"LISTADO DE PACIENTES CLINICA X\n\n"
+    b"TIPO DOC;IDENTIFICACION;NOMBRES;APELLIDOS;CELULAR\n"
+    b"CC;1020304050;Ana;Perez Gomez;3101234567\n"
+    b"CC;1020304051;Luis;Gomez Diaz;3109876543\n"
+)
+
+
+async def test_a_file_shape_question_blocks_the_import_until_answered(
+    scoped: TestClient,
+) -> None:
+    """An unanswered shape question decides which rows exist, so it must block.
+
+    Reading the clinic name as the only heading yields a one-column table and no
+    patients. Committing that would import nothing and report success, which is
+    the failure mode this whole milestone exists to prevent.
+    """
+    body = _upload_bytes(scoped, "preamble.csv", PREAMBLE_CSV)
+    session_id = body["session_id"]
+
+    assert [q["id"] for q in body["structure_questions"]] == ["csv.header_row"]
+    question = body["structure_questions"][0]
+    assert question["answered"] is None
+    assert "LISTADO DE PACIENTES" in question["finding"]
+    assert question["if_approved"] and question["if_declined"]
+
+    validation = scoped.post(f"/onboarding/uploads/{session_id}/validate").json()
+    assert validation["can_commit"] is False
+    assert any("csv.header_row" in reason for reason in validation["blocking"])
+
+    refused = scoped.post(f"/onboarding/uploads/{session_id}/commit")
+    assert refused.status_code == 409
+
+
+async def test_approving_a_shape_question_rereads_the_file(scoped: TestClient) -> None:
+    """The answer changes how the bytes are read, so the file is parsed again."""
+    body = _upload_bytes(scoped, "preamble.csv", PREAMBLE_CSV)
+    session_id = body["session_id"]
+    assert body["sheets"][0]["columns"][0]["column"] == "LISTADO DE PACIENTES CLINICA X"
+
+    answered = scoped.post(
+        f"/onboarding/uploads/{session_id}/structure",
+        json={"id": "csv.header_row", "approved": True},
+    )
+    assert answered.status_code == 200, answered.text
+
+    columns = {c["column"] for c in answered.json()["sheets"][0]["columns"]}
+    assert {"TIPO DOC", "IDENTIFICACION", "NOMBRES", "APELLIDOS", "CELULAR"} == columns
+    # The question stays listed, now marked answered: the file still has a
+    # preamble, and a reviewer needs to see the decision they made rather than
+    # have it disappear. What matters is that nothing is left unanswered.
+    questions = answered.json()["structure_questions"]
+    assert [q["id"] for q in questions] == ["csv.header_row"]
+    assert all(q["answered"] is not None for q in questions)
+
+    scoped.post(f"/onboarding/uploads/{session_id}/validate")
+    committed = scoped.post(f"/onboarding/uploads/{session_id}/commit")
+    assert committed.status_code == 200, committed.text
+    assert sum(committed.json()["committed"].values()) == 2
+
+
+async def test_declining_a_shape_question_keeps_the_file_as_written(
+    scoped: TestClient,
+) -> None:
+    """Declining discards that one finding rather than blocking forever.
+
+    The import then proceeds on the file exactly as written, and what blocks it
+    is the ordinary missing-field refusal rather than the shape question.
+    """
+    body = _upload_bytes(scoped, "preamble.csv", PREAMBLE_CSV)
+    session_id = body["session_id"]
+
+    declined = scoped.post(
+        f"/onboarding/uploads/{session_id}/structure",
+        json={"id": "csv.header_row", "approved": False},
+    )
+    assert declined.status_code == 200
+    assert declined.json()["structure_questions"][0]["answered"] is False
+
+    validation = scoped.post(f"/onboarding/uploads/{session_id}/validate").json()
+    assert not any("csv.header_row" in reason for reason in validation["blocking"])
+
+
+async def test_declining_one_issue_leaves_the_rest_of_the_file_importable(
+    scoped: TestClient,
+) -> None:
+    """A declined issue is discarded, not the whole import.
+
+    One row has an unquoted delimiter. Declining leaves that row out and imports
+    every other patient, rather than refusing the file or silently cutting a
+    cell off the bad row.
+    """
+    raw = (
+        b"TIPO DOC;IDENTIFICACION;NOMBRES;APELLIDOS;CELULAR\n"
+        b"CC;1020304050;Ana;Perez Gomez;3101234567\n"
+        b"CC;1020304051;Luis;Gomez;Diaz;3109876543\n"
+        b"CC;1020304052;Sofia;Ruiz Mora;3151234567\n"
+    )
+    body = _upload_bytes(scoped, "ragged.csv", raw)
+    session_id = body["session_id"]
+    assert [q["id"] for q in body["structure_questions"]] == ["csv.overlong_rows"]
+
+    scoped.post(
+        f"/onboarding/uploads/{session_id}/structure",
+        json={"id": "csv.overlong_rows", "approved": False},
+    )
+    scoped.post(f"/onboarding/uploads/{session_id}/validate")
+    committed = scoped.post(f"/onboarding/uploads/{session_id}/commit")
+    assert committed.status_code == 200, committed.text
+    # Two of the three patients import; the ambiguous row was left out, not cut.
+    assert sum(committed.json()["committed"].values()) == 2
+
+
+async def test_approving_the_ragged_row_imports_it_too(scoped: TestClient) -> None:
+    raw = (
+        b"TIPO DOC;IDENTIFICACION;NOMBRES;APELLIDOS;CELULAR\n"
+        b"CC;1020304050;Ana;Perez Gomez;3101234567\n"
+        b"CC;1020304051;Luis;Gomez Diaz;3109876543;extra\n"
+    )
+    body = _upload_bytes(scoped, "ragged2.csv", raw)
+    session_id = body["session_id"]
+
+    scoped.post(
+        f"/onboarding/uploads/{session_id}/structure",
+        json={"id": "csv.overlong_rows", "approved": True},
+    )
+    scoped.post(f"/onboarding/uploads/{session_id}/validate")
+    committed = scoped.post(f"/onboarding/uploads/{session_id}/commit")
+    assert committed.status_code == 200, committed.text
+    assert sum(committed.json()["committed"].values()) == 2
+
+
+async def test_a_question_that_is_not_about_this_file_is_refused(
+    scoped: TestClient,
+) -> None:
+    body = _upload_bytes(scoped, "preamble.csv", PREAMBLE_CSV)
+    response = scoped.post(
+        f"/onboarding/uploads/{body['session_id']}/structure",
+        json={"id": "csv.invented_question", "approved": True},
+    )
+    assert response.status_code == 422
+
+
+async def test_the_screen_can_answer_a_shape_question(scoped: TestClient) -> None:
+    """The reviewer's own path, not just the API."""
+    body = _upload_bytes(scoped, "preamble.csv", PREAMBLE_CSV)
+    session_id = body["session_id"]
+
+    page = scoped.get(f"/onboarding/uploads/{session_id}/review").text
+    assert "How this file is read" in page
+    assert "LISTADO DE PACIENTES" in page
+
+    scoped.post(
+        f"/onboarding/uploads/{session_id}/review/structure",
+        data={"id": "csv.header_row", "approved": "yes"},
+        follow_redirects=False,
+    )
+    page = scoped.get(f"/onboarding/uploads/{session_id}/review").text
+    assert "Answered: applied" in page
+
+    scoped.post(f"/onboarding/uploads/{session_id}/review/validate", follow_redirects=False)
+    scoped.post(f"/onboarding/uploads/{session_id}/review/commit", follow_redirects=False)
+    assert scoped.get(f"/onboarding/uploads/{session_id}").json()["status"] == "committed"
+
+
+async def test_utf16_csv_imports_rather_than_being_read_as_garbage(
+    scoped: TestClient,
+) -> None:
+    """Excel's "Unicode Text" export used to arrive as NUL-riddled mojibake."""
+    text = (
+        "TIPO DOC;IDENTIFICACION;NOMBRES;APELLIDOS;CELULAR\n"
+        "CC;1020304050;José;Muñoz Pérez;3101234567\n"
+    )
+    body = _upload_bytes(scoped, "unicode.csv", text.encode("utf-16"))
+    assert body["encoding"] == "utf-16"
+    assert {c["column"] for c in body["sheets"][0]["columns"]} == {
+        "TIPO DOC",
+        "IDENTIFICACION",
+        "NOMBRES",
+        "APELLIDOS",
+        "CELULAR",
+    }
+
+    scoped.post(f"/onboarding/uploads/{body['session_id']}/validate")
+    committed = scoped.post(f"/onboarding/uploads/{body['session_id']}/commit")
+    assert committed.status_code == 200, committed.text
+    assert sum(committed.json()["committed"].values()) == 1
+
+
+# ------------- exit criterion: nothing commits that fails validation
+async def test_a_duplicated_patient_blocks_the_commit(scoped: TestClient) -> None:
+    """Two rows with one cedula would write the same patient twice.
+
+    `_apply_patients` matches on the document pair, so the second row updates the
+    first rather than creating anyone: the import would report two patients
+    written and the clinic would have one. That is a silently wrong import, so
+    it blocks until a person decides which row is right.
+    """
+    raw = (
+        b"TIPO DOC;IDENTIFICACION;NOMBRES;APELLIDOS;CELULAR\n"
+        b"CC;1020304050;Ana;Perez Gomez;3101234567\n"
+        b"CC;1020304051;Luis;Gomez Diaz;3109876543\n"
+        b"CC;1020304050;Ana Maria;Perez Gomez;3151234567\n"
+    )
+    body = _upload_bytes(scoped, "dupes.csv", raw)
+    session_id = body["session_id"]
+
+    validation = scoped.post(f"/onboarding/uploads/{session_id}/validate").json()
+    assert validation["can_commit"] is False
+    assert any("row 4" in reason and "row 2" in reason for reason in validation["blocking"]), (
+        validation["blocking"]
+    )
+
+    refused = scoped.post(f"/onboarding/uploads/{session_id}/commit")
+    assert refused.status_code == 409
+
+
+async def test_the_same_number_under_two_document_types_still_imports(
+    scoped: TestClient,
+) -> None:
+    """The duplicate rule must not refuse two genuinely different people.
+
+    A cedula and a tarjeta de identidad may share digits. Blocking this would
+    make the guard worse than not having it.
+    """
+    raw = (
+        b"TIPO DOC;IDENTIFICACION;NOMBRES;APELLIDOS;CELULAR\n"
+        b"CC;1020304050;Ana;Perez Gomez;3101234567\n"
+        b"TI;1020304050;Luis;Gomez Diaz;3109876543\n"
+    )
+    body = _upload_bytes(scoped, "two_types.csv", raw)
+    session_id = body["session_id"]
+
+    validation = scoped.post(f"/onboarding/uploads/{session_id}/validate").json()
+    assert validation["can_commit"] is True, validation["blocking"]
+
+    committed = scoped.post(f"/onboarding/uploads/{session_id}/commit")
+    assert committed.status_code == 200, committed.text
+    assert sum(committed.json()["committed"].values()) == 2
+
+
+async def test_a_reference_to_a_doctor_nobody_defines_blocks_the_commit(
+    scoped: TestClient,
+) -> None:
+    """An appointment naming a doctor that does not exist has nobody attending it.
+
+    The clean fixture defines its own doctors, so its appointments pass. This
+    file names a doctor no sheet defines and the clinic does not have.
+    """
+    body = _upload(scoped, "1_clean_ips.xlsx")
+    session_id = body["session_id"]
+    citas = next(s for s in body["sheets"] if s["sheet"] == "Citas")
+    doctor_column = next(
+        (c["column"] for c in citas["columns"] if c["target_field"] == "doctor_ref"), None
+    )
+    if doctor_column is None:
+        pytest.skip("the clean fixture does not map a doctor reference")
+
+    # Its own doctors sheet is left out, so the references have nothing to resolve
+    # against and nothing in the clinic satisfies them either.
+    scoped.put(
+        f"/onboarding/uploads/{session_id}/mapping",
+        json={"sheet": "Medicos", "mapping": {}, "entity": "skip"},
+    )
+    validation = scoped.post(f"/onboarding/uploads/{session_id}/validate").json()
+
+    assert validation["can_commit"] is False
+    assert any("not in this file" in reason for reason in validation["blocking"]), validation[
+        "blocking"
+    ]
