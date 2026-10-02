@@ -29,7 +29,8 @@ from src.core.ratelimit import InProcessRateLimiter
 #: upload route is exempt and enforces its own, larger limit while streaming.
 MAX_REQUEST_BODY_BYTES = 1_000_000
 
-#: Paths that receive a file rather than a JSON body.
+#: The exact paths that receive a file rather than a JSON body. Matched exactly,
+#: so the JSON sub-routes under `/onboarding/uploads/...` stay bounded.
 UPLOAD_PATHS = ("/onboarding/uploads", "/onboarding/upload")
 
 #: Host headers the review surface answers to. A browser reaching loopback from

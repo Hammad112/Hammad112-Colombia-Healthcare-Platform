@@ -30,6 +30,7 @@ from typing import Final
 
 import phonenumbers
 
+from src.core.timezones import BOGOTA
 from src.registry.models import DocumentType
 
 
@@ -67,6 +68,49 @@ def _review[T](rule: str, message: str) -> Outcome[T]:
 
 def _invalid[T](rule: str, message: str) -> Outcome[T]:
     return Outcome(Status.INVALID, None, rule, message)
+
+
+#: How far back and forward each kind of date may plausibly fall, as years from
+#: today. `date()` alone cannot judge this: it serves a birth date and an
+#: appointment date, and next year is wrong for one and ordinary for the other.
+#:
+#: Generous on purpose. The oldest verified Colombians are around 115, so 130
+#: admits every living patient and still catches a year typed as 1890 or 0001.
+#: An appointment 5 years out is a long-range control; 2 years back covers a
+#: historical import, and a clinic migrating older history will see a question
+#: rather than a silent acceptance.
+DATE_RANGES: Final = {
+    "birth_date": (-130, 0),
+    "consent_granted_at": (-30, 0),
+    "appointment_date": (-2, 5),
+    "valid_from": (-30, 5),
+    "valid_to": (-30, 30),
+}
+
+
+def plausible_date(value: dt.date, field_name: str, *, today: dt.date | None = None) -> str | None:
+    """Why this date is implausible for this field, or None if it is fine.
+
+    Returns the message rather than an Outcome so the caller keeps the rule name
+    it already has; a field with no range is never questioned.
+    """
+    window = DATE_RANGES.get(field_name)
+    if window is None:
+        return None
+    today = today or dt.datetime.now(tz=BOGOTA).date()
+    earliest = today.replace(year=today.year + window[0])
+    latest = today.replace(year=today.year + window[1])
+    if value < earliest:
+        return (
+            f"{value.isoformat()} is further back than a {field_name.replace('_', ' ')} "
+            f"should reach. Confirm the year."
+        )
+    if value > latest:
+        return (
+            f"{value.isoformat()} is further ahead than a "
+            f"{field_name.replace('_', ' ')} should reach. Confirm the year."
+        )
+    return None
 
 
 def _ascii_digits(text: str) -> bool:

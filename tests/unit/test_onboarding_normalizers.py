@@ -547,3 +547,38 @@ def test_a_cedula_of_non_ascii_digits_is_refused(raw: str) -> None:
 def test_a_real_cedula_still_passes(raw: str) -> None:
     """The narrower test must not refuse what clinics actually send."""
     assert n.document_number(raw).status is n.Status.VALID
+
+
+# --------------------------------- a date bounded by what its field means
+# `date()` accepted year 1 and year 9999. The bound cannot live in the
+# normalizer: the same function serves a birth date and an appointment date,
+# which disagree about whether next year is wrong. So the range belongs to the
+# field, and an out-of-range date goes to review -- "1890" may be a typo for
+# 1980 and a human can see which.
+
+_TODAY = dt.date(2026, 10, 2)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [dt.date(1, 1, 1), dt.date(9999, 12, 31), dt.date(1890, 5, 5), dt.date(2030, 1, 1)],
+)
+def test_an_implausible_birth_date_is_questioned(value: dt.date) -> None:
+    assert n.plausible_date(value, "birth_date", today=_TODAY) is not None
+
+
+@pytest.mark.parametrize("value", [dt.date(1952, 10, 5), dt.date(2005, 6, 1), dt.date(1915, 1, 1)])
+def test_a_real_birth_date_passes(value: dt.date) -> None:
+    """130 years admits every living patient; the oldest verified are about 115."""
+    assert n.plausible_date(value, "birth_date", today=_TODAY) is None
+
+
+def test_an_appointment_next_year_is_not_questioned() -> None:
+    """The same range on every date field would refuse ordinary scheduling."""
+    assert n.plausible_date(dt.date(2027, 3, 1), "appointment_date", today=_TODAY) is None
+    # ...while one from 1990 is as wrong as a birth date in 2030.
+    assert n.plausible_date(dt.date(1990, 1, 1), "appointment_date", today=_TODAY) is not None
+
+
+def test_a_field_with_no_range_is_never_questioned() -> None:
+    assert n.plausible_date(dt.date(1, 1, 1), "some_other_field", today=_TODAY) is None

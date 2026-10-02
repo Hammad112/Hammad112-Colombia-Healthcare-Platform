@@ -114,6 +114,17 @@ PARSE_TIMEOUT_SECONDS: Final = 120
 PARSE_MEMORY_BYTES: Final = 2 * 1024 * 1024 * 1024
 
 
+#: Questions whose unanswered state means the "headings" may be patient data
+#: rather than column names: either row 1 is the data, or the real headings are
+#: somewhere below a title line. Nothing may be sent to a model about a column
+#: whose name might be a cédula.
+#:
+#: `csv.duplicate_headers` and `csv.overlong_rows` are deliberately absent: both
+#: describe a file whose headings are genuine, so a model may be asked about
+#: them. Adding a question id here is a decision about what leaves the machine.
+HEADINGS_MAY_BE_DATA: Final = frozenset({"csv.no_header_row", "csv.header_row"})
+
+
 class UnreadableFile(Exception):
     """The file cannot be read safely, or cannot be read without guessing."""
 
@@ -141,6 +152,10 @@ class StructureQuestion:
     applied_if_approved: str
     #: What declining does.
     applied_if_declined: str
+    #: True approved, False declined, None not yet answered. A question stays
+    #: listed once answered, so a reviewer can see what they decided; this is
+    #: what distinguishes "still open" from "still shown".
+    answered: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +176,25 @@ class Sheet:
     warnings: tuple[str, ...] = ()
     #: Findings a human must decide before anything is imported.
     questions: tuple[StructureQuestion, ...] = ()
+
+    @property
+    def headings_are_settled(self) -> bool:
+        """Whether `headers` can be trusted to be column names.
+
+        Used to decide whether a column name may be sent to a model: a heading
+        the clinic wrote is not patient data, and a cédula read as a heading is.
+
+        A question about which row holds the headings leaves them unsettled
+        while it is open, and **declining it does not settle them**: declining
+        means "read row 1 as the headings", which is the reviewer asserting what
+        the file could not show. They may be right, but the cost of being wrong
+        is a patient's cédula leaving the machine, and the dictionary and fuzzy
+        stages still run on those columns either way. Approving does settle
+        them, because the headings are then positional names we generated.
+        """
+        return not any(
+            q.id in HEADINGS_MAY_BE_DATA and q.answered is not True for q in self.questions
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -481,6 +515,7 @@ def read_csv(path: Path, answers: Mapping[str, bool] | None = None) -> ReadResul
         questions.append(
             StructureQuestion(
                 id="csv.no_header_row",
+                answered=decided.get("csv.no_header_row"),
                 finding=(
                     f"The first row does not look like column headings: "
                     f"{list(rows[0])[:4]!r}. If this file has no heading row, "
@@ -500,6 +535,7 @@ def read_csv(path: Path, answers: Mapping[str, bool] | None = None) -> ReadResul
         questions.append(
             StructureQuestion(
                 id="csv.header_row",
+                answered=decided.get("csv.header_row"),
                 finding=(
                     f"The file opens with {detected_header} line(s) above the table: "
                     f"{rows[0][0][:60]!r}. Row {detected_header + 1} looks like the "
@@ -540,6 +576,7 @@ def read_csv(path: Path, answers: Mapping[str, bool] | None = None) -> ReadResul
         questions.append(
             StructureQuestion(
                 id="csv.duplicate_headers",
+                answered=decided.get("csv.duplicate_headers"),
                 finding=(
                     f"More than one column is called {duplicated!r}. Only one of each "
                     f"can be imported; the other would be silently ignored."
@@ -587,6 +624,7 @@ def read_csv(path: Path, answers: Mapping[str, bool] | None = None) -> ReadResul
         questions.append(
             StructureQuestion(
                 id="csv.overlong_rows",
+                answered=decided.get("csv.overlong_rows"),
                 finding=(
                     f"Row(s) {shown}{more} have more fields than there are headings. "
                     f"The extra values have nowhere to go, which usually means an "
@@ -824,6 +862,7 @@ def read_excel(path: Path, answers: Mapping[str, bool] | None = None) -> ReadRes
                 sheet_questions.append(
                     StructureQuestion(
                         id="csv.no_header_row",
+                        answered=decided.get("csv.no_header_row"),
                         finding=(
                             f"Sheet '{worksheet.title}' row {header_row} does not look "
                             f"like column headings: {list(headers)[:4]!r}. If this sheet "

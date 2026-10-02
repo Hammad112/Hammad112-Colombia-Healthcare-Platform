@@ -429,3 +429,40 @@ def test_no_patient_value_reaches_a_provider_from_a_workbook(
     assert asked == [], f"these values were sent to a provider: {asked}"
     for sentinel in SENTINELS:
         assert sentinel not in " ".join(asked)
+
+
+def test_a_file_with_genuine_headings_still_gets_a_proposal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """Gating on "any question at all" removed an in-scope feature for no gain.
+
+    A file with duplicate headings, or a row with too many fields, has real
+    headings -- the clinic wrote them -- so a model may be asked about an
+    ambiguous one. The first fix for the leak silenced the mapping proposal for
+    every such file, including after the reviewer answered. Only a question about
+    WHICH ROW holds the headings means a heading might be a patient.
+    """
+    from src.onboarding import service
+    from src.onboarding.reader import read
+
+    asked: list[str] = []
+
+    def _spy(question: llm.ColumnQuestion, entity: Entity, **kwargs: Any) -> None:
+        asked.append(question.header)
+        raise llm.LLMUnavailable("spy")
+
+    monkeypatch.setattr(llm, "suggest", _spy)
+    monkeypatch.setattr(
+        "src.onboarding.service.get_settings",
+        lambda: _settings(openai_api_key="a-key-so-the-stage-is-enabled"),
+    )
+
+    # An overlong row raises a question, and the headings are genuine.
+    path = tmp_path / "overlong.csv"
+    path.write_bytes(b"TIPO DOC;IDENTIFICACION;ZZZ RARO\nCC;1020304050;a;b\n")
+    parsed = read(path)
+    assert [q.id for q in parsed.questions] == ["csv.overlong_rows"]
+    assert parsed.sheets[0].headings_are_settled
+
+    service.analyse(parsed)
+    assert asked == ["ZZZ RARO"], asked

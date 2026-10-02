@@ -1777,3 +1777,49 @@ def test_a_hostile_filename_does_not_reach_the_filesystem(
     assert response.status_code == 201, response.text
     # The clinic's own spelling is still what the screen shows.
     assert response.json()["filename"] == filename[:255]
+
+
+async def test_the_upload_exemption_does_not_unbound_the_json_routes(
+    scoped: TestClient,
+) -> None:
+    """The exemption is an exact path, not a prefix.
+
+    The upload route is exempt from the global body limit because it bounds the
+    file itself while streaming. Matching by prefix exempted every JSON
+    sub-route under the same path too, so `.../mapping`, `.../validate` and
+    `.../rows/correct` accepted an unbounded body.
+    """
+    body = _upload_bytes(
+        scoped,
+        "bounded.csv",
+        b"TIPO DOC;IDENTIFICACION;NOMBRES;APELLIDOS\nCC;1077770001;Ana;Perez Gomez\n",
+    )
+    session_id = body["session_id"]
+
+    oversized = "y" * 3_000_000
+    mapping = scoped.put(
+        f"/onboarding/uploads/{session_id}/mapping",
+        json={"sheet": "bounded", "mapping": {"x": oversized}},
+    )
+    assert mapping.status_code == 413, mapping.status_code
+
+    structure = scoped.post(
+        f"/onboarding/uploads/{session_id}/structure",
+        json={"id": oversized, "approved": True},
+    )
+    assert structure.status_code == 413, structure.status_code
+
+
+async def test_a_large_export_still_imports(scoped: TestClient) -> None:
+    """And the exemption must still do its job: a real export is not a JSON body."""
+    header = b"TIPO DOC;IDENTIFICACION;NOMBRES;APELLIDOS\n"
+    # 30,000 rows, which exceeds the 1 MB global limit the upload route is
+    # exempt from. The assertion below is what makes this test mean anything:
+    # at 20,000 the body was 789 KB and would have passed with no exemption.
+    rows = b"".join(
+        f"CC;10{index:08d};Paciente{index};Perez Gomez\n".encode() for index in range(30000)
+    )
+    assert len(header + rows) > 1_000_000, "the fixture must exceed the global limit"
+
+    body = _upload_bytes(scoped, "large.csv", header + rows)
+    assert sum(s["total_rows"] for s in body["sheets"]) == 30000

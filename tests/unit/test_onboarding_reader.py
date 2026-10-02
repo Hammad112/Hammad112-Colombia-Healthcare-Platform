@@ -914,3 +914,57 @@ def test_a_workbook_with_real_headings_is_not_questioned(tmp_path: Path) -> None
     workbook.save(path)
 
     assert read(path).questions == ()
+
+
+# ------------------- what makes a heading safe to send to a model
+# Gating the model stage on "any question at all" closed the leak but silenced
+# an in-scope feature for files whose headings are genuine. Only a question
+# about WHICH ROW holds the headings means a heading might be a patient.
+
+
+def test_a_duplicate_heading_question_does_not_unsettle_the_headings(
+    tmp_path: Path,
+) -> None:
+    """Duplicate headings are a naming problem; the headings are still headings.
+
+    Four columns, so this trips only the duplicate question: a three-column
+    file with a repeated heading also scores low enough to raise
+    `csv.header_row`, which legitimately does unsettle them.
+    """
+    path = _csv(
+        tmp_path,
+        b"TIPO DOC;IDENTIFICACION;NOMBRE;NOMBRE\nCC;1020304050;Ana;Perez\n",
+    )
+    result = read(path)
+
+    assert [q.id for q in result.questions] == ["csv.duplicate_headers"]
+    assert result.sheets[0].headings_are_settled
+
+
+def test_an_open_header_question_unsettles_the_headings(tmp_path: Path) -> None:
+    path = _csv(tmp_path, b"CC;1020304050;Ana Perez\nCC;1020304051;Luis Gomez\n")
+    assert read(path).sheets[0].headings_are_settled is False
+
+
+def test_declining_a_header_question_does_not_settle_the_headings(
+    tmp_path: Path,
+) -> None:
+    """Declining is the reviewer asserting what the file could not show.
+
+    They may be right, but the cost of being wrong is a patient's cédula leaving
+    the machine, and the dictionary and fuzzy stages run on those columns either
+    way. Approving does settle them, because the headings are then positional
+    names we generated.
+    """
+    path = _csv(tmp_path, b"CC;1020304050;Ana Perez\n")
+    assert read(path, {"csv.no_header_row": False}).sheets[0].headings_are_settled is False
+    assert read(path, {"csv.no_header_row": True}).sheets[0].headings_are_settled is True
+
+
+def test_a_question_records_whether_it_was_answered(tmp_path: Path) -> None:
+    """ "Still listed" is not "still open": a reviewer sees what they decided."""
+    path = _csv(tmp_path, b"CC;1020304050;Ana Perez\n")
+
+    assert read(path).questions[0].answered is None
+    assert read(path, {"csv.no_header_row": True}).questions[0].answered is True
+    assert read(path, {"csv.no_header_row": False}).questions[0].answered is False

@@ -160,11 +160,15 @@ def _ask_model(sheet: Sheet, entity: Entity, mapping: SheetMapping) -> dict[str,
         return {}
 
     # A heading is only safely a heading once we know the file HAS headings.
-    # When a structure question is outstanding the "headers" may be row 1 of the
-    # data -- a cédula, a name, a phone -- and sending those as column names
-    # would put patient values in a provider's payload and in our logs. Nothing
-    # is asked until a person has said how the file reads.
-    if sheet.questions:
+    # While a question about which row holds them is open, the "headers" may be
+    # row 1 of the data -- a cédula, a name, a phone -- and sending those as
+    # column names would put patient values in a provider's payload and in our
+    # logs.
+    #
+    # Only those questions silence this stage. A file with duplicate headings or
+    # an overlong row has genuine headings, and gating on "any question at all"
+    # removed an in-scope feature from those files for no safety gain.
+    if not sheet.headings_are_settled:
         return {}
 
     unresolved = [p for p in mapping.proposals if not p.auto]
@@ -441,7 +445,16 @@ def _apply(canonical: Field, raw: str, order: norm.DayFirst) -> norm.Outcome[Any
         case "phone":
             return norm.phone(raw)
         case "date":
-            return norm.date(raw, order=order)
+            converted = norm.date(raw, order=order)
+            # The range belongs to the field: `date()` serves a birth date and an
+            # appointment date, which disagree about whether next year is wrong.
+            if (
+                converted.status is norm.Status.VALID
+                and converted.value is not None
+                and (complaint := norm.plausible_date(converted.value, canonical.name))
+            ):
+                return norm.Outcome(norm.Status.REVIEW, None, "date.implausible", complaint)
+            return converted
         case "time":
             return norm.time_of_day(raw)
         case "status":
