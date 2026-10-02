@@ -1744,3 +1744,36 @@ async def test_revalidating_one_sheet_keeps_the_others(scoped: TestClient) -> No
         scoped.get(f"/onboarding/uploads/{session_id}/transform-log", params={"limit": 2000}).json()
     )
     assert second == first, f"revalidation changed the log size: {first} -> {second}"
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "..",  # PurePosixPath("..").name is ".."
+        "...",
+        "  ",  # Windows refuses a name of spaces
+        "a:b.csv",  # an NTFS alternate data stream
+        "a?b.csv",
+        "a|b.csv",
+        "x" * 300,  # longer than NAME_MAX on either platform
+        "../victim/x.csv",
+        "pacientes.xlsx",  # and an ordinary one, so the guard is not a refusal
+    ],
+)
+def test_a_hostile_filename_does_not_reach_the_filesystem(
+    scoped: TestClient, filename: str
+) -> None:
+    """The client's filename is never used as a path.
+
+    Taking its last component stopped "../x" escaping the temp directory, but
+    the name still reached `open()` -- and ".." or "a:b.csv" or 300 characters is
+    a filesystem error, not a filename, so seven such uploads answered 500. The
+    bytes go to a name we chose; `detect_kind` reads bytes, not names.
+    """
+    response = scoped.post(
+        "/onboarding/uploads",
+        files={"file": (filename, b"TIPO DOC;IDENTIFICACION\nCC;1020304050\n")},
+    )
+    assert response.status_code == 201, response.text
+    # The clinic's own spelling is still what the screen shows.
+    assert response.json()["filename"] == filename[:255]

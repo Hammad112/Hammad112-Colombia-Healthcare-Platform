@@ -24,7 +24,7 @@ import hashlib
 import shutil
 import tempfile
 import uuid
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Annotated, Any, Final
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
@@ -154,14 +154,23 @@ async def upload(
     profile is applied and there is nothing left to correct — which is what lets
     a repeat import run without a model call.
     """
-    # The filename is the client's, and `Path(dir) / name` does not confine it:
-    # "../x" climbs out of the temp directory and an absolute path replaces it
-    # entirely, so `target.parent` became a directory outside our own that the
-    # `finally` below then deleted. Only the last component is used, and the
-    # directory to remove is the one we created.
+    # The client's filename is never used as a path. Taking its last component
+    # stopped "../x" escaping the temp directory, but the name still reached
+    # `open()`, and a name of ".." or "a:b.csv" or 300 characters is a filesystem
+    # error rather than a filename -- seven such names answered the upload with a
+    # 500. The bytes go to a name we choose.
+    #
+    # The extension is kept because openpyxl refuses a file by extension before
+    # looking at its contents: a neutral ".bin" made every workbook unreadable.
+    # Only a short alphanumeric suffix is taken, so the extension cannot carry a
+    # path or a filesystem-hostile character either.
     upload_dir = Path(tempfile.mkdtemp())
-    safe_name = PurePosixPath((file.filename or "upload").replace("\\", "/")).name
-    target = upload_dir / (safe_name or "upload")
+    suffix = Path((file.filename or "").replace("\\", "/")).suffix.lower()
+    safe_suffix = suffix if suffix[1:].isalnum() and len(suffix) <= 6 else ""
+    target = upload_dir / f"upload{safe_suffix}"
+    # Kept for the session record and the screen, trimmed to what the column
+    # holds, because that is the only place the clinic's own name belongs.
+    stored_name = (file.filename or "upload")[:255]
     digest = hashlib.sha256()
     written = 0
     keep_upload = False
@@ -215,7 +224,7 @@ async def upload(
         record = await repository.create_session(
             db,
             clinic_id=scope.clinic_id,
-            filename=file.filename or target.name,
+            filename=stored_name,
             file_size=written,
             file_sha256=sha256,
             report={},
