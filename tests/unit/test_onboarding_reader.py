@@ -14,11 +14,13 @@ import csv
 import pickle
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
 
 from src.onboarding.reader import (
+    MAX_UNCOMPRESSED_BYTES,
     UnreadableFile,
     decode,
     detect_kind,
@@ -806,3 +808,59 @@ def test_a_repeated_heading_is_not_mistaken_for_a_missing_one(tmp_path: Path) ->
     """
     path = _csv(tmp_path, b"NOMBRE;NOMBRE;CELULAR\nAna;Perez;3101234567\n")
     assert [q.id for q in read(path).questions] == ["csv.duplicate_headers"]
+
+
+# ------------------------------------- one archive guard per test
+# The zip-bomb fixture cannot reach these guards: it has no workbook part, so it
+# is refused as unreadable first. Each archive below trips exactly one guard.
+
+
+def _archive(tmp_path: Path, members: dict[str, bytes], name: str = "a.xlsx") -> Path:
+    path = tmp_path / name
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for member, payload in members.items():
+            archive.writestr(member, payload)
+    return path
+
+
+def test_a_declared_uncompressed_size_over_the_limit_is_refused(tmp_path: Path) -> None:
+    """The cheap check: the central directory says how big it unpacks to."""
+    oversized = b"\0" * (MAX_UNCOMPRESSED_BYTES + 1024)
+    path = _archive(tmp_path, {"xl/workbook.xml": oversized})
+
+    with pytest.raises(UnreadableFile, match="uncompressed"):
+        inspect_archive(path)
+
+
+def test_a_compression_ratio_over_the_limit_is_refused(tmp_path: Path) -> None:
+    """A small file that unpacks enormously, under the absolute size cap.
+
+    Sized to stay below MAX_UNCOMPRESSED_BYTES so only the ratio can refuse it;
+    zeros compress far past the ratio limit.
+    """
+    payload = b"\0" * (MAX_UNCOMPRESSED_BYTES // 2)
+    path = _archive(tmp_path, {"xl/workbook.xml": payload})
+
+    with pytest.raises(UnreadableFile, match=r"expands|ratio"):
+        inspect_archive(path)
+
+
+def test_too_many_members_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A workbook has tens of parts, not thousands; thousands is a bomb.
+
+    The cap is lowered for the test rather than the archive built past the real
+    one. Building 2,001 members works, but if the cap is ever raised the test
+    would build enough tiny files to trip the *ratio* guard instead and pass for
+    the wrong reason -- which is exactly what it did on the first attempt.
+    """
+    monkeypatch.setattr("src.onboarding.reader.MAX_ARCHIVE_MEMBERS", 10)
+    members = {f"xl/worksheets/sheet{i}.xml": b"<x/>" for i in range(11)}
+    path = _archive(tmp_path, members)
+
+    with pytest.raises(UnreadableFile, match=r"parts|members"):
+        inspect_archive(path)
+
+
+def test_an_ordinary_workbook_passes_every_archive_guard(tmp_path: Path) -> None:
+    """The guards must not refuse a real file; this is what makes them usable."""
+    inspect_archive(FIXTURES / "1_clean_ips.xlsx")

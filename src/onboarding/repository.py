@@ -3,10 +3,16 @@
 Two halves, with different rules.
 
 The **staging** half writes to the `onboarding` schema. Those rows are a copy of
-the clinic's file plus what our rules made of it; nothing there has been
-accepted by a person. They are not patient data yet, so they are not audited as
-disclosures — but they do contain patient values, which is why the tables are
-clinic-scoped and behind row-level security like everything else.
+the clinic's file plus what our rules made of it, so they hold cédulas, names
+and phone numbers. Reading them back is therefore a patient-data read and is
+audited like any other: rule 8 is about the values, not about whether a person
+has accepted them yet. The tables are clinic-scoped and behind row-level
+security for the same reason.
+
+Writing them is not audited. A staged row is this import's own working copy and
+every value in it came from the file the clinic just uploaded; the upload itself
+is the event worth recording, and an entry per staged cell would bury the
+disclosures that matter in a log nobody can read.
 
 The **apply** half writes to `app`, and every row it creates or updates is a
 patient-data write, so it records an audit entry through the same helper every
@@ -193,7 +199,47 @@ async def staged_rows(
     if status:
         statement = statement.where(StagingRow.status == status)
     result = await session.scalars(statement.order_by(StagingRow.row_number).limit(limit))
-    return list(result.all())
+    rows = list(result.all())
+    await _record_staging_reads(
+        session,
+        clinic_id=clinic_id,
+        session_id=session_id,
+        resource="staging_rows",
+        count=len(rows),
+    )
+    return rows
+
+
+async def _record_staging_reads(
+    session: AsyncSession,
+    *,
+    clinic_id: uuid.UUID,
+    session_id: uuid.UUID,
+    resource: str,
+    count: int,
+) -> None:
+    """Record that staged patient values were served.
+
+    One entry per request rather than per row: the staging tables are keyed by
+    import session, not by patient, so there is no patient id to attribute a
+    row to until it is applied. What the log needs to answer is "who read this
+    import's contents, and when", and the session id answers it.
+    """
+    if not count:
+        return
+    await record_accesses(
+        session,
+        AccessAction.READ,
+        [
+            Access(
+                resource=resource,
+                resource_id=str(session_id),
+                # No patient id: a staged row is not yet attributed to a
+                # patient record, and inventing one would be a wrong link.
+                patient_id=None,
+            )
+        ],
+    )
 
 
 async def transform_log(
@@ -212,7 +258,15 @@ async def transform_log(
     result = await session.scalars(
         statement.order_by(TransformLogEntry.row_number, TransformLogEntry.id).limit(limit)
     )
-    return list(result.all())
+    entries = list(result.all())
+    await _record_staging_reads(
+        session,
+        clinic_id=clinic_id,
+        session_id=session_id,
+        resource="transform_log",
+        count=len(entries),
+    )
+    return entries
 
 
 # ----------------------------------------------------------------- profiles

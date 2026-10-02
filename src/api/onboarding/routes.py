@@ -124,6 +124,14 @@ def stored_skips(record: Any) -> list[str]:
     return list((record.report or {}).get("skipped_sheets", []))
 
 
+def _readable_size(limit: int) -> str:
+    """A byte count as a person would say it, so a refusal names a real number."""
+    megabytes = limit / (1024 * 1024)
+    if megabytes >= 1:
+        return f"{megabytes:.0f} MB"
+    return f"{limit / 1024:.0f} KB"
+
+
 def _default_mapping(report: service.SheetReport) -> dict[str, str | None]:
     """What the reviewer sees pre-ticked: confident proposals only."""
     return {c.column: (c.target_field if c.auto else None) for c in report.columns}
@@ -164,7 +172,11 @@ async def upload(
                 if written > MAX_UPLOAD_BYTES:
                     raise HTTPException(
                         status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                        f"File is larger than {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
+                        # Stated in whichever unit reads sensibly: integer MB
+                        # rendered a sub-megabyte limit as "0 MB", which tells
+                        # a receptionist nothing about the file they chose.
+                        f"File is larger than the {_readable_size(MAX_UPLOAD_BYTES)} "
+                        f"limit for an upload.",
                     )
                 digest.update(chunk)
                 handle.write(chunk)

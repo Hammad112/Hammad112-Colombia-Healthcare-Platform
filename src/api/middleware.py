@@ -169,15 +169,27 @@ class BodySizeLimitMiddleware:
     itself (`await request.body()`), crossing the limit produces 413. FastAPI
     endpoints that declare a body parameter parse the body inside their own
     error handling and respond 400 instead. A body that is never read is never
-    counted. No current endpoint accepts a body.
+    counted.
+
+    `exempt_paths` are endpoints whose job is to receive a file and which bound
+    the upload themselves while streaming it. Without the exemption a global
+    limit sized for a JSON body also caps every spreadsheet, so a real clinic
+    export is refused with "Payload too large" before the reader sees it and the
+    route's own, larger limit becomes dead code.
     """
 
-    def __init__(self, app: ASGIApp, max_bytes: int) -> None:
+    def __init__(self, app: ASGIApp, max_bytes: int, exempt_paths: tuple[str, ...] = ()) -> None:
         self.app = app
         self.max_bytes = max_bytes
+        self.exempt_paths = exempt_paths
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        if any(path.startswith(prefix) for prefix in self.exempt_paths):
             await self.app(scope, receive, send)
             return
 

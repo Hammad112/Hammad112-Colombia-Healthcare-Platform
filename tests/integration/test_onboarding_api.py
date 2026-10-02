@@ -95,7 +95,11 @@ async def test_a_spanish_csv_is_read_with_the_right_encoding(scoped: TestClient)
 @pytest.mark.parametrize(
     ("fixture", "expected"),
     [
-        ("5_zip_bomb.xlsx", 413),  # rejected on size before it is parsed
+        # Refused by the archive guard, which names the real problem: the
+        # declared uncompressed size. It used to be refused by the global body
+        # limit instead -- a 413 "Payload too large" that was an accident of the
+        # limit being 1 MB, and which said nothing about why the file is hostile.
+        ("5_zip_bomb.xlsx", 422),
         ("5_not_really_csv.csv", 422),  # an executable renamed .csv
         ("5_xxe.xlsx", 422),  # an external entity in the workbook XML
     ],
@@ -1650,3 +1654,46 @@ async def test_two_commits_of_one_import_admit_exactly_one(
     assert first.status_code == 200, first.text
     assert second.status_code == 409
     assert "already committed" in second.json()["detail"]
+
+
+# ----------------------------------------- rule 8 over the staging tables
+async def test_reading_staged_patient_values_is_audited(
+    scoped: TestClient, session: AsyncSession
+) -> None:
+    """Staged rows hold cédulas, names and phones, so reading them is a disclosure.
+
+    These two endpoints recorded nothing, on the reasoning that a row nobody has
+    accepted "is not patient data yet". The endpoint returns an unmasked cédula
+    and phone number to whoever asks, so rule 8 applies: it is about the values,
+    not about whether a reviewer has blessed them.
+
+    Recorded in the repository rather than the route, so a second route reading
+    the same rows cannot forget.
+    """
+    from sqlalchemy import func
+
+    from src.audit.models import AccessLogEntry
+
+    body = _upload_bytes(
+        scoped,
+        "audited.csv",
+        b"TIPO DOC;IDENTIFICACION;NOMBRES;APELLIDOS;CELULAR\n"
+        b"CC;1066660001;Ana;Perez Gomez;3101234567\n",
+    )
+    session_id = body["session_id"]
+    scoped.post(f"/onboarding/uploads/{session_id}/validate")
+
+    async def entries() -> int:
+        return int(await session.scalar(select(func.count()).select_from(AccessLogEntry)) or 0)
+
+    before = await entries()
+    rows = scoped.get(f"/onboarding/uploads/{session_id}/rows")
+    assert rows.status_code == 200
+    # The values really are unmasked, which is why this must be logged.
+    assert "1066660001" in rows.text
+    after_rows = await entries()
+    assert after_rows > before, "serving staged rows recorded no audit entry"
+
+    log = scoped.get(f"/onboarding/uploads/{session_id}/transform-log")
+    assert log.status_code == 200
+    assert await entries() > after_rows, "serving the transform log recorded no entry"
