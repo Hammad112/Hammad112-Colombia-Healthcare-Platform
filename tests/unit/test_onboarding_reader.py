@@ -864,3 +864,53 @@ def test_too_many_members_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyP
 def test_an_ordinary_workbook_passes_every_archive_guard(tmp_path: Path) -> None:
     """The guards must not refuse a real file; this is what makes them usable."""
     inspect_archive(FIXTURES / "1_clean_ips.xlsx")
+
+
+def test_a_workbook_with_no_heading_row_is_asked_about(tmp_path: Path) -> None:
+    """The CSV-only fix left the Excel half of the same defect open.
+
+    A workbook whose row 1 is data had that patient read as the column names:
+    lost from the data, and -- because `_ask_model` keys off `sheet.questions` --
+    still sent to the mapping model as if it were a heading. Same question id as
+    the CSV path, because it is the same question about the same thing.
+    """
+    from openpyxl import Workbook
+
+    path = tmp_path / "headerless.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    assert sheet is not None
+    sheet.title = "Pacientes"
+    sheet.append(["CC", "1020304050", "Ana Perez Gomez", "3101234567"])
+    sheet.append(["CC", "1020304051", "Luis Gomez Diaz", "3151112233"])
+    workbook.save(path)
+
+    asked = read(path)
+    assert [q.id for q in asked.questions] == ["csv.no_header_row"]
+    # Unanswered, row 1 is still taken as headings, which is what the question
+    # exists to stand between and a committed import.
+    assert len(asked.sheets[0].rows) == 1
+
+    approved = read(path, {"csv.no_header_row": True})
+    assert approved.sheets[0].headers == ("column 1", "column 2", "column 3", "column 4")
+    assert len(approved.sheets[0].rows) == 2
+    assert approved.sheets[0].rows[0][2] == "Ana Perez Gomez"
+
+    declined = read(path, {"csv.no_header_row": False})
+    assert declined.sheets[0].headers[2] == "Ana Perez Gomez"
+
+
+def test_a_workbook_with_real_headings_is_not_questioned(tmp_path: Path) -> None:
+    """A question nobody needs teaches reviewers to click past the real one."""
+    from openpyxl import Workbook
+
+    path = tmp_path / "headed.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    assert sheet is not None
+    sheet.title = "Pacientes"
+    sheet.append(["TIPO DOC", "IDENTIFICACION", "NOMBRES", "APELLIDOS"])
+    sheet.append(["CC", "1020304050", "Ana", "Perez Gomez"])
+    workbook.save(path)
+
+    assert read(path).questions == ()

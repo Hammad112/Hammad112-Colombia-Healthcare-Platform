@@ -762,7 +762,13 @@ def _structure(path: Path) -> dict[str, _SheetStructure]:
         workbook.close()
 
 
-def read_excel(path: Path) -> ReadResult:
+def read_excel(path: Path, answers: Mapping[str, bool] | None = None) -> ReadResult:
+    """Read a workbook.
+
+    `answers` carries the reviewer's decisions, keyed by question id, exactly as
+    for a CSV: a workbook can be headerless too, and the answer changes which
+    row is data.
+    """
     inspect_archive(path)
     try:
         structure = _structure(path)
@@ -806,11 +812,42 @@ def read_excel(path: Path) -> ReadResult:
             if not rows:
                 continue
 
+            decided = dict(answers or {})
             headers = tuple(_cell_text(value) for value in rows[0])
+
+            # A workbook with no heading row would otherwise have its first
+            # patient read as the column names: lost from the data, and sent to
+            # the mapping model as if it were a heading.
+            sheet_questions: list[StructureQuestion] = []
+            synthetic_header = False
+            if not _looks_like_a_header(headers):
+                sheet_questions.append(
+                    StructureQuestion(
+                        id="csv.no_header_row",
+                        finding=(
+                            f"Sheet '{worksheet.title}' row {header_row} does not look "
+                            f"like column headings: {list(headers)[:4]!r}. If this sheet "
+                            f"has no heading row, reading it as one would lose that record."
+                        ),
+                        applied_if_approved=(
+                            "Treat the first row as data and name the columns by "
+                            "position (column 1, column 2, ...), so nothing is lost."
+                        ),
+                        applied_if_declined=(
+                            "Treat the first row as the headings, as the sheet has it."
+                        ),
+                    )
+                )
+                if decided.get("csv.no_header_row"):
+                    headers = tuple(f"column {position}" for position in range(1, len(headers) + 1))
+                    synthetic_header = True
+
             width = len(headers)
             body: list[tuple[str, ...]] = []
             uncalculated = 0
-            for row_number, row in enumerate(rows[1:], start=header_row + 1):
+            data_rows = rows if synthetic_header else rows[1:]
+            first_number = header_row if synthetic_header else header_row + 1
+            for row_number, row in enumerate(data_rows, start=first_number):
                 cells: list[str] = []
                 for column_index, value in enumerate(row[:width], start=1):
                     text = _cell_text(value)
@@ -844,10 +881,11 @@ def read_excel(path: Path) -> ReadResult:
                     name=worksheet.title,
                     headers=headers,
                     rows=tuple(body),
-                    header_row=header_row,
+                    header_row=0 if synthetic_header else header_row,
                     hidden_row_numbers=hidden_rows,
                     hidden_columns=hidden_columns,
                     warnings=tuple(sheet_warnings),
+                    questions=tuple(sheet_questions),
                 )
             )
             warnings.extend(sheet_warnings)
@@ -972,4 +1010,4 @@ def read(path: Path, answers: Mapping[str, bool] | None = None) -> ReadResult:
         raise UnreadableFile(
             "Legacy .xls is not supported. Save the file as .xlsx and upload it again."
         )
-    return read_excel(path)
+    return read_excel(path, answers)

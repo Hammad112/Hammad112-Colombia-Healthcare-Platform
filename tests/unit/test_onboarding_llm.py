@@ -383,3 +383,49 @@ def test_an_ambiguous_heading_still_reaches_the_model(
     service.analyse(read(path))
 
     assert asked == ["COLUMNA RARA XYZ"]
+
+
+def test_no_patient_value_reaches_a_provider_from_a_workbook(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """The same guarantee by the Excel path, which the first fix missed.
+
+    `_ask_model` returns early while a structure question is open, but the Excel
+    reader raised no question at all, so a headerless workbook's first patient
+    still went out as a column heading. Fixing only the CSV path left half the
+    defect in place; this test is the half that was missing.
+    """
+    from openpyxl import Workbook
+
+    from src.onboarding import service
+    from src.onboarding.reader import read
+
+    asked: list[str] = []
+
+    def _spy(question: llm.ColumnQuestion, entity: Entity, **kwargs: Any) -> None:
+        asked.append(question.header)
+        raise llm.LLMUnavailable("spy")
+
+    monkeypatch.setattr(llm, "suggest", _spy)
+    monkeypatch.setattr(
+        "src.onboarding.service.get_settings",
+        lambda: _settings(openai_api_key="a-key-so-the-stage-is-enabled"),
+    )
+
+    path = tmp_path / "headerless.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    assert sheet is not None
+    sheet.title = "Pacientes"
+    sheet.append(["CC", "9999888877", "Zzyzx Sentinelensen Marcadorez", "3009998877"])
+    sheet.append(["CC", "1020304051", "Luis Gomez Diaz", "3151112233"])
+    workbook.save(path)
+
+    parsed = read(path)
+    assert [q.id for q in parsed.questions] == ["csv.no_header_row"]
+
+    service.analyse(parsed)
+
+    assert asked == [], f"these values were sent to a provider: {asked}"
+    for sentinel in SENTINELS:
+        assert sentinel not in " ".join(asked)
