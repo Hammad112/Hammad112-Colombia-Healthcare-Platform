@@ -139,3 +139,55 @@ def test_two_columns_for_one_name_field_join_in_the_files_order() -> None:
 
     rows, _ = service.validate(sheet, Entity.PATIENT, mapping, decisions={})
     assert rows[0].values["family_names"] == "Perez Gomez"
+
+
+def test_a_repeated_heading_names_the_first_column_once() -> None:
+    """Declining the duplicate question promises "the first of each".
+
+    `{header: position}` keeps the LAST, so the second column was converted --
+    twice, because the heading appears twice in `sheet.headers`, which joined a
+    shared name field to itself and stored "Ana Ana".
+    """
+    from src.onboarding.reader import Sheet
+
+    sheet = Sheet(
+        name="Pacientes",
+        headers=("TIPO DOC", "IDENTIFICACION", "NOMBRES", "NOMBRES", "APELLIDOS"),
+        rows=(("CC", "1020304050", "Ana", "Maria", "Perez Gomez"),),
+        header_row=1,
+    )
+    mapping = {
+        "TIPO DOC": "document_type",
+        "IDENTIFICACION": "document_number",
+        "NOMBRES": "given_names",
+        "APELLIDOS": "family_names",
+    }
+
+    rows, _ = service.validate(sheet, Entity.PATIENT, mapping, decisions={})
+    assert rows[0].values["given_names"] == "Ana"
+
+
+def test_four_name_columns_still_join_after_the_dedupe() -> None:
+    """Deduping headings must not break the RIPS four-column join.
+
+    Those are four DIFFERENT headings mapping to two fields, which is the case
+    `SHARED_FIELDS` exists for; a repeated heading is one column named twice.
+    """
+    from src.onboarding.reader import Sheet
+
+    sheet = Sheet(
+        name="Pacientes",
+        headers=("PRIMER NOMBRE", "SEGUNDO NOMBRE", "PRIMER APELLIDO", "SEGUNDO APELLIDO"),
+        rows=(("Carlos", "Andres", "Perez", "Gomez"),),
+        header_row=1,
+    )
+    mapping = {
+        "PRIMER NOMBRE": "given_names",
+        "SEGUNDO NOMBRE": "given_names",
+        "PRIMER APELLIDO": "family_names",
+        "SEGUNDO APELLIDO": "family_names",
+    }
+
+    rows, _ = service.validate(sheet, Entity.PATIENT, mapping, decisions={})
+    assert rows[0].values["given_names"] == "Carlos Andres"
+    assert rows[0].values["family_names"] == "Perez Gomez"

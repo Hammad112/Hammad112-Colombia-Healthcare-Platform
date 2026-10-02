@@ -1697,3 +1697,50 @@ async def test_reading_staged_patient_values_is_audited(
     log = scoped.get(f"/onboarding/uploads/{session_id}/transform-log")
     assert log.status_code == 200
     assert await entries() > after_rows, "serving the transform log recorded no entry"
+
+
+async def test_every_sheet_keeps_its_transform_log(scoped: TestClient) -> None:
+    """Validating one sheet used to erase every other sheet's evidence.
+
+    `replace_staging` clears the previous attempt before writing the new one,
+    which is right -- a reviewer may validate repeatedly. But the log had no
+    sheet column, so the clear covered the whole session: a three-sheet workbook
+    ended with only the last sheet logged, and `/transform-log` could not show
+    the rule that produced a patient's cell. That log is the ADR-08a evidence.
+    """
+    body = _upload(scoped, "1_clean_ips.xlsx")
+    session_id = body["session_id"]
+    sheets = [s["sheet"] for s in body["sheets"]]
+    assert len(sheets) >= 3, sheets
+
+    scoped.post(f"/onboarding/uploads/{session_id}/validate")
+    log = scoped.get(
+        f"/onboarding/uploads/{session_id}/transform-log", params={"limit": 2000}
+    ).json()
+    logged = {entry["column"] for entry in log}
+
+    # A column from each sheet, so the assertion fails if any sheet was erased.
+    assert any(c in logged for c in ("Nombres", "Celular")), f"Pacientes missing: {logged}"
+    assert any(c in logged for c in ("Especialidad", "Consultorio")), f"Medicos missing: {logged}"
+    assert any(c in logged for c in ("Fecha Cita", "Hora")), f"Citas missing: {logged}"
+
+
+async def test_revalidating_one_sheet_keeps_the_others(scoped: TestClient) -> None:
+    """The clear must be per sheet, not per session.
+
+    This is the mechanism behind the loss: a second validation pass over one
+    sheet took the rest with it.
+    """
+    body = _upload(scoped, "1_clean_ips.xlsx")
+    session_id = body["session_id"]
+    scoped.post(f"/onboarding/uploads/{session_id}/validate")
+    first = len(
+        scoped.get(f"/onboarding/uploads/{session_id}/transform-log", params={"limit": 2000}).json()
+    )
+
+    # Validate again: every sheet is re-converted, so the total should match.
+    scoped.post(f"/onboarding/uploads/{session_id}/validate")
+    second = len(
+        scoped.get(f"/onboarding/uploads/{session_id}/transform-log", params={"limit": 2000}).json()
+    )
+    assert second == first, f"revalidation changed the log size: {first} -> {second}"

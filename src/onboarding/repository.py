@@ -138,12 +138,15 @@ async def replace_staging(
     Validation may be run more than once — a reviewer corrects the mapping and
     tries again — so the previous attempt is cleared rather than added to.
     """
+    # Both tables are cleared for this sheet only. The log used to be cleared
+    # for the whole session, so validating a second sheet erased the first
+    # sheet's evidence.
     for table in (StagingRow, TransformLogEntry):
         await session.execute(
             delete(table).where(
                 table.session_id == session_id,
                 table.clinic_id == clinic_id,
-                *([StagingRow.sheet == sheet] if table is StagingRow else []),
+                table.sheet == sheet,
             )
         )
 
@@ -168,6 +171,7 @@ async def replace_staging(
                 TransformLogEntry(
                     clinic_id=clinic_id,
                     session_id=session_id,
+                    sheet=sheet,
                     row_number=cell.row_number,
                     column_name=cell.column,
                     target_field=cell.target_field,

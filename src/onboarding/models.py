@@ -139,6 +139,10 @@ class TransformLogEntry(Base):
         ForeignKey("onboarding.import_sessions.id", ondelete="CASCADE")
     )
     row_number: Mapped[int] = mapped_column(Integer)
+    #: Which sheet the cell came from. A workbook's sheets are validated one at
+    #: a time and each pass clears its own previous attempt, so without this the
+    #: clear took every other sheet's log with it.
+    sheet: Mapped[str | None] = mapped_column(String(120))
     column_name: Mapped[str] = mapped_column(String(255))
     target_field: Mapped[str | None] = mapped_column(String(80))
     #: What the file held. A reviewer's answer never overwrites it.

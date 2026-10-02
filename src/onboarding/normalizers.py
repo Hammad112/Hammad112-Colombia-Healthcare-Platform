@@ -69,6 +69,17 @@ def _invalid[T](rule: str, message: str) -> Outcome[T]:
     return Outcome(Status.INVALID, None, rule, message)
 
 
+def _ascii_digits(text: str) -> bool:
+    """Whether every character is 0-9.
+
+    `str.isdigit()` is not this test: it is true for superscripts, circled
+    numerals and fullwidth and Arabic-Indic digits, none of which `int()` can
+    parse and none of which belongs in a cédula or a date. Accepting them stored
+    a value nobody typed and, where `int()` followed, crashed the request.
+    """
+    return bool(text) and text.isascii() and text.isdecimal()
+
+
 def strip_accents(value: str) -> str:
     """Casefold and remove accents, for matching only.
 
@@ -180,10 +191,10 @@ def document_number(raw: str) -> Outcome[str]:
     # that happens to be whole. Neither loses information, so both are accepted.
     if re.fullmatch(r"\d{1,3}(\.\d{3})+", text):
         text = text.replace(".", "")
-    elif text.endswith(".0") and text[:-2].isdigit():
+    elif text.endswith(".0") and _ascii_digits(text[:-2]):
         text = text[:-2]
 
-    if not text.isdigit():
+    if not _ascii_digits(text):
         # Passports and foreign documents legitimately contain letters.
         if re.fullmatch(r"[A-Za-z0-9-]{4,20}", text):
             return _valid(text.upper(), "document_number.alphanumeric")
@@ -297,7 +308,7 @@ def weekday(raw: str) -> Outcome[int]:
     if (found := _WEEKDAYS.get(text)) is not None:
         return _valid(found, "weekday.name")
 
-    if text.isdigit():
+    if _ascii_digits(text):
         return _review(
             "weekday.numeric",
             f"{raw!r} is a number, and a numbered day is ambiguous: 1 is Monday in "
@@ -631,7 +642,7 @@ def date(raw: str, *, order: DayFirst, epoch_1904: bool = False) -> Outcome[dt.d
         except ValueError as error:
             return _invalid("date.impossible", f"{raw!r} is not a real date ({error}).")
 
-    if text.isdigit():
+    if _ascii_digits(text):
         # `19900315` is a compact date, not a serial: eight digits beginning
         # with a plausible year is the form RIPS and many Colombian systems
         # export, and reading it as a day count is how it became an

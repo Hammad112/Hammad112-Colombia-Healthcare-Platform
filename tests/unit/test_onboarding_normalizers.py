@@ -517,3 +517,33 @@ def test_a_name_without_a_comma_keeps_its_previous_reading() -> None:
 
     # Three tokens stay undecidable: no comma, no rule.
     assert n.split_full_name("Carlos Perez Gomez").status is n.Status.REVIEW
+
+
+# ------------------------- a digit `int()` cannot parse (second review pass)
+# `str.isdigit()` is true for superscripts, circled numerals, and fullwidth and
+# Arabic-Indic digits. None of them belongs in a cédula or a date, and where
+# `int()` followed the request died with a 500.
+
+
+@pytest.mark.parametrize("raw", ["²", "³", "①", "１２３", "٣٣٣"])
+def test_a_digit_int_cannot_parse_is_refused_not_crashed(raw: str) -> None:
+    """A stray character in a date column answered the upload with a 500."""
+    outcome = n.date(raw, order=n.DayFirst.DAY_FIRST)
+    assert outcome.status in (n.Status.REVIEW, n.Status.INVALID)
+
+
+@pytest.mark.parametrize("raw", ["²²²²", "１０２０３０４０５０", "٣٣٣٣٣"])
+def test_a_cedula_of_non_ascii_digits_is_refused(raw: str) -> None:
+    """Stored verbatim, these were a value nobody typed.
+
+    A cédula is ASCII digits. `isdigit()` accepted characters that look like
+    digits and reported them valid, which is the "never guess" rule broken by a
+    standard-library surprise.
+    """
+    assert n.document_number(raw).status is n.Status.REVIEW
+
+
+@pytest.mark.parametrize("raw", ["1020304050", "71234567", "1020304050.0"])
+def test_a_real_cedula_still_passes(raw: str) -> None:
+    """The narrower test must not refuse what clinics actually send."""
+    assert n.document_number(raw).status is n.Status.VALID

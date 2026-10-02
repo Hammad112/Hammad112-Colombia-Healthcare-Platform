@@ -287,6 +287,9 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("row_number", sa.Integer(), nullable=False),
+        # Which sheet the cell came from. Without it, clearing one sheet's log
+        # before revalidating cleared every sheet's.
+        sa.Column("sheet", sa.String(120), nullable=True),
         sa.Column("column_name", sa.String(255), nullable=False),
         sa.Column("target_field", sa.String(80), nullable=True),
         sa.Column("raw_value", sa.Text(), nullable=True),

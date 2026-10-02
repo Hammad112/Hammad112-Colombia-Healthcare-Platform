@@ -126,6 +126,21 @@ def analyse(result: ReadResult) -> tuple[SheetReport, ...]:
     return tuple(_analyse_sheet(sheet) for sheet in result.sheets)
 
 
+def _column_index(sheet: Sheet) -> dict[str, int]:
+    """Position of each heading, keeping the FIRST where a heading repeats.
+
+    A dict comprehension keeps the last, so a file with two columns called
+    NOMBRES converted the second one twice and never read the first -- while the
+    duplicate-headers question promises that declining "imports the first of
+    each". Numbering the repeats is what the reviewer approves; declining has to
+    mean what it says.
+    """
+    index: dict[str, int] = {}
+    for position, header in enumerate(sheet.headers):
+        index.setdefault(header, position)
+    return index
+
+
 def _ask_model(sheet: Sheet, entity: Entity, mapping: SheetMapping) -> dict[str, ColumnReport]:
     """Ask a model about the columns the deterministic stages could not resolve.
 
@@ -158,7 +173,7 @@ def _ask_model(sheet: Sheet, entity: Entity, mapping: SheetMapping) -> dict[str,
 
     taken = {p.field.name for p in mapping.proposals if p.auto and p.field}
     candidates = tuple(f.name for f in FIELDS_BY_ENTITY[entity] if f.name not in taken)
-    index = {header: position for position, header in enumerate(sheet.headers)}
+    index = _column_index(sheet)
     improved: dict[str, ColumnReport] = {}
 
     for proposal in unresolved:
@@ -256,7 +271,7 @@ def _column_questions(sheet: Sheet, mapping: SheetMapping) -> tuple[str, ...]:
     every row in it.
     """
     questions: list[str] = []
-    index = {header: position for position, header in enumerate(sheet.headers)}
+    index = _column_index(sheet)
     for proposal in mapping.proposals:
         if proposal.field is None or proposal.field.normalizer != "date":
             continue
@@ -299,7 +314,7 @@ def validate(
     exactly like an original one.
     """
     decisions = decisions or {}
-    index = {header: position for position, header in enumerate(sheet.headers)}
+    index = _column_index(sheet)
 
     # Date order is decided once per column, from the whole column, before any
     # row is converted. Deciding per row would let one file contain both
@@ -331,7 +346,15 @@ def validate(
         # columns joined into one field (primerApellido + segundoApellido) would
         # otherwise be joined in whatever order the database handed back --
         # storing "Gomez Perez" for a patient whose file says "Perez Gomez".
-        in_file_order = [(header, mapping[header]) for header in sheet.headers if header in mapping]
+        # In the file's column order, each heading once. A repeated heading
+        # names one column as far as the mapping is concerned -- the first, per
+        # `_column_index` -- so listing it twice converted that one column twice
+        # and joined it to itself ("Ana Ana") for a shared name field.
+        in_file_order = [
+            (header, mapping[header])
+            for header in dict.fromkeys(sheet.headers)
+            if header in mapping
+        ]
         row = RowResult(
             row_number=offset,
             entity=entity,
