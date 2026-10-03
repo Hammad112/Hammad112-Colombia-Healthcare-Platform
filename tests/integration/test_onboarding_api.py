@@ -682,7 +682,7 @@ async def test_rows_below_the_table_can_be_excluded(scoped: TestClient) -> None:
 
     scoped.put(
         f"/onboarding/uploads/{session_id}/mapping",
-        json={"sheet": "AGENDA", "mapping": {}, "excluded_rows": [17, 18, 19, 20]},
+        json={"sheet": "AGENDA", "mapping": {}, "excluded_rows": [18, 21, 22, 23]},
     )
     cleaned = scoped.post(f"/onboarding/uploads/{session_id}/validate").json()
     assert cleaned["can_commit"] is True, cleaned["blocking"]
@@ -716,7 +716,7 @@ async def test_a_third_differently_structured_file_imports(scoped: TestClient, s
             "sheet": "AGENDA",
             "mapping": {},
             "entity": "patient",
-            "excluded_rows": [17, 18, 19, 20],
+            "excluded_rows": [18, 21, 22, 23],
         },
     )
     scoped.post(f"/onboarding/uploads/{session_id}/validate")
@@ -765,7 +765,7 @@ async def test_the_messy_workbook_is_fixed_entirely_from_the_screen(
     )
     scoped.post(
         f"/onboarding/uploads/{session_id}/review/AGENDA",
-        data={"entity": "patient", "exclude": "17, 18, 19 y 20"},
+        data={"entity": "patient", "exclude": "18, 21, 22 y 23"},
         follow_redirects=False,
     )
     scoped.post(f"/onboarding/uploads/{session_id}/review/validate", follow_redirects=False)
@@ -800,7 +800,7 @@ async def test_a_reviewer_can_answer_a_row_the_file_cannot_decide(
             "sheet": "AGENDA",
             "mapping": {},
             "entity": "patient",
-            "excluded_rows": [17, 18, 19, 20],
+            "excluded_rows": [18, 21, 22, 23],
         },
     )
     scoped.post(f"/onboarding/uploads/{session_id}/validate")
@@ -834,7 +834,7 @@ async def test_a_reviewer_can_answer_a_row_the_file_cannot_decide(
             "sheet": "AGENDA",
             "mapping": {},
             "entity": "patient",
-            "excluded_rows": [15, 16, 17, 18, 19, 20],
+            "excluded_rows": [15, 16, 18, 21, 22, 23],
         },
     )
     scoped.post(f"/onboarding/uploads/{session_id}/validate")
@@ -870,7 +870,7 @@ async def test_a_correction_is_converted_by_the_same_rules(scoped: TestClient) -
             "sheet": "AGENDA",
             "mapping": {},
             "entity": "patient",
-            "excluded_rows": [17, 18, 19, 20],
+            "excluded_rows": [18, 21, 22, 23],
         },
     )
     scoped.post(f"/onboarding/uploads/{session_id}/validate")
@@ -922,7 +922,7 @@ async def test_a_refused_row_can_be_answered_from_the_screen(scoped: TestClient)
     )
     scoped.post(
         f"/onboarding/uploads/{session_id}/review/AGENDA",
-        data={"entity": "patient", "exclude": "17, 18, 19 y 20"},
+        data={"entity": "patient", "exclude": "18, 21, 22 y 23"},
         follow_redirects=False,
     )
     scoped.post(f"/onboarding/uploads/{session_id}/review/validate", follow_redirects=False)
@@ -950,7 +950,7 @@ async def test_a_refused_row_can_be_answered_from_the_screen(scoped: TestClient)
     # by typing them into "rows to leave out".
     scoped.post(
         f"/onboarding/uploads/{session_id}/review/AGENDA",
-        data={"entity": "patient", "exclude": "15, 16, 17, 18, 19 y 20"},
+        data={"entity": "patient", "exclude": "15, 16, 18, 21, 22 y 23"},
         follow_redirects=False,
     )
     scoped.post(f"/onboarding/uploads/{session_id}/review/validate", follow_redirects=False)
@@ -987,7 +987,7 @@ async def test_a_correction_never_overwrites_what_the_file_held(
             "sheet": "AGENDA",
             "mapping": {},
             "entity": "patient",
-            "excluded_rows": [17, 18, 19, 20],
+            "excluded_rows": [18, 21, 22, 23],
         },
     )
     scoped.post(f"/onboarding/uploads/{session_id}/validate")
@@ -1945,7 +1945,7 @@ async def test_a_corrected_sheet_type_survives_the_next_upload(scoped: TestClien
             "sheet": "AGENDA",
             "mapping": {},
             "entity": "patient",
-            "excluded_rows": [17, 18, 19, 20],
+            "excluded_rows": [18, 21, 22, 23],
         },
     )
     assert corrected.status_code == 200, corrected.text
@@ -2053,3 +2053,147 @@ async def test_a_hidden_row_is_actually_flagged_not_just_announced(
     assert rows.status_code == 200, rows.text
     flagged = {r["row_number"] for r in rows.json()}
     assert {15, 16} <= flagged, f"hidden rows were not flagged: {sorted(flagged)}"
+
+
+async def test_every_staging_route_that_serves_patient_values_is_audited(
+    scoped: TestClient, session: AsyncSession
+) -> None:
+    """Discovered from OpenAPI, so a route added later cannot be forgotten.
+
+    Rule 8 says the audit guard covers the import's staging tables too, but the
+    discovery-based check lives in `test_review_api.py` and its pattern matches
+    only `/review/...`. The test above names `rows` and `transform-log` by hand,
+    which protects those two and nothing else: a new staging route serving
+    patient values would pass CI with no audit entry at all.
+
+    This walks every GET under an upload and asserts that any response carrying
+    the planted cédula recorded an entry.
+    """
+    from sqlalchemy import func
+
+    from src.audit.models import AccessLogEntry
+
+    planted = "1066660002"
+    body = _upload_bytes(
+        scoped,
+        "discovered.csv",
+        b"TIPO DOC;IDENTIFICACION;NOMBRES;APELLIDOS;CELULAR\n"
+        + f"CC;{planted};Ana;Perez Gomez;3101234567\n".encode(),
+    )
+    session_id = body["session_id"]
+    scoped.post(f"/onboarding/uploads/{session_id}/validate")
+
+    async def entries() -> int:
+        return int(await session.scalar(select(func.count()).select_from(AccessLogEntry)) or 0)
+
+    templates = [
+        path
+        for path, operations in scoped.get("/openapi.json").json()["paths"].items()
+        if "get" in operations and path.startswith("/onboarding/uploads/{session_id}")
+    ]
+    assert len(templates) >= 3, templates
+
+    checked = 0
+    for template in templates:
+        response = scoped.get(template.format(session_id=session_id))
+        if response.status_code != 200 or planted not in response.text:
+            continue  # this route serves no patient value for this session
+        checked += 1
+        before = await entries()
+        again = scoped.get(template.format(session_id=session_id))
+        assert again.status_code == 200, template
+        assert await entries() > before, f"{template} served {planted} with no audit entry"
+
+    assert checked >= 2, f"expected the staging routes to serve patient values, saw {checked}"
+
+
+async def test_two_sheet_kinds_sharing_headers_do_not_borrow_each_others_profile(
+    scoped: TestClient,
+) -> None:
+    """A profile is confirmed for a kind of sheet, not merely for a set of headers.
+
+    Doctores and Especialidades can both export as ("Nombre", "Codigo"). Keyed on
+    headers alone they shared one profile, so the next upload applied the doctor
+    mapping and the doctor entity to the specialties sheet: pre-ticked
+    "confirmed", nothing missing, nothing blocking, and specialties written into
+    the clinic's doctors. Once both kinds exist for one shape the import must
+    stop reusing and let the reviewer say which it is.
+    """
+    header = b"Nombre;Codigo\n"
+    doctors = _upload_bytes(scoped, "medicos.csv", header + b"Ana Perez Gomez;MED-1\n")
+    scoped.put(
+        f"/onboarding/uploads/{doctors['session_id']}/mapping",
+        json={
+            "sheet": "upload",
+            "entity": "doctor",
+            "mapping": {"Nombre": "full_name", "Codigo": "external_ref"},
+        },
+    )
+    scoped.post(f"/onboarding/uploads/{doctors['session_id']}/validate")
+    assert scoped.post(f"/onboarding/uploads/{doctors['session_id']}/commit").status_code == 200
+
+    specialties = _upload_bytes(scoped, "especialidades.csv", header + b"Cardiologia;CAR\n")
+    scoped.put(
+        f"/onboarding/uploads/{specialties['session_id']}/mapping",
+        json={
+            "sheet": "upload",
+            "entity": "specialty",
+            "mapping": {"Nombre": "name", "Codigo": "external_ref"},
+        },
+    )
+    scoped.post(f"/onboarding/uploads/{specialties['session_id']}/validate")
+    assert scoped.post(f"/onboarding/uploads/{specialties['session_id']}/commit").status_code == 200
+    assert len(scoped.get("/onboarding/profiles").json()) == 2, (
+        "one shape confirmed as two kinds must leave two profiles, not one overwriting the other"
+    )
+
+    # A third file of the same shape, guessed `specialty`. It may reuse the
+    # specialty profile -- that is the exit criterion working -- but it must
+    # never be handed the doctor one, which would relabel the sheet and write
+    # specialty names into the clinic's doctors with nothing blocking.
+    again = _upload_bytes(scoped, "otra.csv", header + b"Pediatria;PED\n")
+    sheet = again["sheets"][0]
+    assert sheet["entity"] == "specialty", (
+        f"the sheet was relabelled {sheet['entity']!r} by another kind's profile"
+    )
+    targets = {c["column"]: c["target_field"] for c in sheet["columns"]}
+    assert targets["Nombre"] == "name", (
+        f"Nombre was mapped to {targets['Nombre']!r}, which is the doctor profile"
+    )
+
+
+async def test_a_lone_profile_of_another_kind_is_not_borrowed(scoped: TestClient) -> None:
+    """The dangerous shape of the collision: one profile, confirmed as the wrong kind.
+
+    With a doctor profile stored for ("Nombre", "Codigo") and no specialty one, a
+    specialties file of the same shape used to be handed the doctor mapping and
+    the doctor entity -- pre-ticked "confirmed", nothing missing, nothing
+    blocking -- and `commit` wrote specialty names into the clinic's doctors.
+
+    A profile confirmed for a different kind of sheet, from a different file, is
+    not evidence about this one.
+    """
+    header = b"Nombre;Codigo\n"
+    doctors = _upload_bytes(scoped, "medicos.csv", header + b"Ana Perez Gomez;MED-1\n")
+    scoped.put(
+        f"/onboarding/uploads/{doctors['session_id']}/mapping",
+        json={
+            "sheet": "upload",
+            "entity": "doctor",
+            "mapping": {"Nombre": "full_name", "Codigo": "external_ref"},
+        },
+    )
+    scoped.post(f"/onboarding/uploads/{doctors['session_id']}/validate")
+    assert scoped.post(f"/onboarding/uploads/{doctors['session_id']}/commit").status_code == 200
+
+    # A different file, the same shape, genuinely specialties.
+    other = _upload_bytes(scoped, "especialidades.csv", header + b"Cardiologia;CAR\n")
+    sheet = other["sheets"][0]
+    assert sheet["entity"] == "specialty", (
+        f"the doctor profile relabelled this sheet {sheet['entity']!r}"
+    )
+    targets = {c["column"]: c["target_field"] for c in sheet["columns"]}
+    assert targets["Nombre"] != "full_name", (
+        "Nombre was mapped to the doctor profile's field, so these rows would "
+        "have been written as doctors"
+    )

@@ -216,3 +216,72 @@ def test_two_rows_missing_the_same_identifier_are_not_duplicates() -> None:
         _patient(3, document_type="CC", document_number=None),
     ]
     assert service.find_duplicates(rows, Entity.PATIENT) == {}
+
+
+# ------------------------------- a profile belongs to a kind of sheet, not a shape
+# The fingerprint keyed on headers alone, so a workbook whose Doctores and
+# Especialidades sheets both read ("Nombre", "Codigo") produced one profile for
+# both. The next upload then applied the doctor mapping AND the doctor entity to
+# the specialties sheet, pre-ticked "confirmed" with nothing missing, so
+# specialties were written into the clinic's doctors with no refusal anywhere.
+
+
+def test_two_sheet_kinds_sharing_headers_do_not_share_a_profile() -> None:
+    from src.onboarding.repository import header_fingerprint
+
+    headers = ("Nombre", "Codigo")
+    assert header_fingerprint(headers, "doctor") != header_fingerprint(headers, "specialty")
+
+
+def test_a_profile_still_matches_the_same_sheet_reordered_or_recased() -> None:
+    """The reuse the exit criterion depends on must survive the stricter key."""
+    from src.onboarding.repository import header_fingerprint
+
+    original = header_fingerprint(("Nombre", "Codigo"), "doctor")
+    assert header_fingerprint(("Codigo", "Nombre"), "doctor") == original
+    assert header_fingerprint(("NOMBRE", "codigo"), "doctor") == original
+    # A genuinely different shape is still reviewed afresh.
+    assert header_fingerprint(("Nombre", "Codigo", "Email"), "doctor") != original
+
+
+def test_a_blank_row_does_not_shift_every_row_number_after_it(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Row numbers must mean the line the reviewer sees in their own file.
+
+    Blank rows are dropped while reading, so counting from the header put every
+    later row one out. The hidden-row flag then landed on the row below the
+    hidden one: the hidden row imported as valid and a visible row was sent to
+    review in its place. `excluded_rows` and every refusal that names a line to
+    fix drift the same way.
+    """
+    from openpyxl import Workbook
+
+    from src.onboarding.reader import read
+
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.append(["Nombre", "Codigo"])  # row 1
+    worksheet.append(["Ana", "A1"])  # row 2
+    worksheet.append([None, None])  # row 3, blank and dropped
+    worksheet.append(["Luis", "L1"])  # row 4, hidden
+    worksheet.append(["Marta", "M1"])  # row 5
+    worksheet.row_dimensions[4].hidden = True
+    path = tmp_path / "blank.xlsx"
+    workbook.save(path)
+
+    result = read(path)
+    sheet = result.sheets[0]
+    assert sheet.hidden_row_numbers == (4,)
+    assert sheet.row_numbers == (2, 4, 5), "rows did not keep their own line numbers"
+
+    report = service.analyse(result)[0]
+    rows, _ = service.validate(
+        sheet, report.entity, {c.column: c.target_field for c in report.columns}
+    )
+    # By name, not by number. Under the old counting "Marta" was numbered 4 and
+    # was flagged, so a test asserting only the number passed while the wrong
+    # patient was the one held back.
+    flagged = {row.raw["Nombre"] for row in rows if row.reviews}
+    assert flagged == {"Luis"}, f"the hidden row is Luis; the flag landed on {flagged}"
+    assert {row.row_number for row in rows} == {2, 4, 5}, (
+        "rows are not numbered as the sheet shows them"
+    )

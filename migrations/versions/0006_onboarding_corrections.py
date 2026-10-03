@@ -12,10 +12,11 @@ with `UndefinedColumn: transform_log.sheet`, with nothing at startup explaining
 why. This revision applies the four, and `test_migrations.py` compares the
 resulting schema against the models so the pair cannot drift again.
 
-Each step is written to be safe on a database that already has the change,
-because `0005` on disk now creates it: a fresh install runs 0005 then 0006 and
-must not fail on the second. That is why every step is `IF NOT EXISTS` or drops
-the constraint before recreating it.
+Each step is written to be safe on a database that already has the change. The
+CHECK value and the grant are created by 0005 on disk, so a fresh install
+applies them twice; the two columns are created only here, since aa79672 removed
+them from 0005. Either way the second application must not fail, which is why
+every step is `IF NOT EXISTS` or drops the constraint before recreating it.
 """
 
 from __future__ import annotations
@@ -93,23 +94,14 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    role = _runtime_role()
+    """Drop only the two columns. The constraint and the grant belong to 0005.
 
-    op.execute(f'REVOKE ALL ON app.specialties FROM "{role}"')
-
-    op.execute(
-        "ALTER TABLE onboarding.import_sessions DROP CONSTRAINT IF EXISTS "
-        "ck_import_sessions_import_session_status_valid"
-    )
-    without_review = ", ".join(
-        f"'{status}'" for status in _SESSION_STATUSES if status != "needs_review"
-    )
-    op.create_check_constraint(
-        "import_session_status_valid",
-        "import_sessions",
-        f"status IN ({without_review})",
-        schema="onboarding",
-    )
-
+    Reverting those as well would be wrong twice over. 0005 on disk creates the
+    `needs_review` value and the specialties grant, so undoing them here leaves
+    revision 0005 in a state a fresh `upgrade 0005` never produces -- the schema
+    would differ depending on which direction it was reached from. And narrowing
+    the CHECK fails outright on any database holding a blocked import, because
+    those rows carry exactly the status being removed.
+    """
     op.drop_column("transform_log", "corrected_from_review", schema="onboarding")
     op.drop_column("transform_log", "sheet", schema="onboarding")

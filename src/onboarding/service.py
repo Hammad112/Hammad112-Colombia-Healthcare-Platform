@@ -338,7 +338,16 @@ def validate(
     counts: dict[str, Counter[str]] = {column: Counter() for column in mapping}
 
     excluded = excluded_rows or set()
-    for offset, raw_row in enumerate(sheet.rows, start=sheet.header_row + 1):
+    # The row number the reviewer sees, which is not the position in `rows`: a
+    # blank line between two patients is dropped while reading, so counting from
+    # the header puts every later row one out. Everything keyed on a row number
+    # -- the hidden-row flag, `excluded_rows`, a refusal naming a line to fix --
+    # then points at the wrong patient. The reader supplies the real numbers;
+    # the count is the fallback for a sheet that dropped nothing.
+    numbers = sheet.row_numbers or tuple(
+        range(sheet.header_row + 1, sheet.header_row + 1 + len(sheet.rows))
+    )
+    for offset, raw_row in zip(numbers, sheet.rows, strict=True):
         # A row the reviewer marked as not a record — a totals line, the heading
         # of a second table — is left out entirely rather than counted as a
         # broken patient, which would block the import for no reason.
@@ -484,6 +493,20 @@ def _apply(canonical: Field, raw: str, order: norm.DayFirst) -> norm.Outcome[Any
             # No normalizer: the value is stored as written, trimmed. An empty
             # optional field is not an error.
             text = raw.strip()
+            # A cell beginning with one of these is a formula to Excel,
+            # LibreOffice and Sheets. `split_full_name` refuses them, but most
+            # free-text fields -- given_names, family_names, a doctor's or a
+            # specialty's name -- have no normalizer and reach here, so the
+            # same payload was stored verbatim through any of them. Inert in
+            # the database, executable the moment anyone exports the sheet.
+            if text and text[0] in norm.FORMULA_LEADS:
+                return norm.Outcome(
+                    norm.Status.REVIEW,
+                    None,
+                    "text.looks_like_a_formula",
+                    f"{raw!r} starts with {text[0]!r}, so a spreadsheet would read it "
+                    "as a formula rather than a value. Confirm what it should say.",
+                )
             return norm.Outcome(norm.Status.VALID, text or None, "text.as_written")
 
 

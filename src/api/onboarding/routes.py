@@ -222,11 +222,32 @@ async def upload(
         reused: list[str] = []
         for index, report in enumerate(reports):
             sheet = next(s for s in result.sheets if s.name == report.sheet)
-            profile = await repository.find_profile(
-                db,
-                clinic_id=scope.clinic_id,
-                fingerprint=repository.header_fingerprint(sheet.headers),
+            # Every profile confirmed for a sheet of this shape, not just one.
+            # The entity is part of the key, so a workbook whose Doctores and
+            # Especialidades sheets share headers has one profile each.
+            candidates = await repository.find_profiles_for_shape(
+                db, clinic_id=scope.clinic_id, headers=sheet.headers
             )
+            # A profile confirmed for the kind of sheet we guessed is the plain
+            # case, and it wins outright.
+            matching = [p for p in candidates if _stored_entity(p) is report.entity]
+            if not matching:
+                # Nothing for our guess. A profile may still apply, but only if
+                # it was confirmed for a sheet of this name: that is a reviewer
+                # saying "this sheet, which you keep guessing wrong, is really a
+                # patient sheet", and it is how AGENDA keeps its correction.
+                #
+                # Without the name it is a different sheet that merely shares
+                # headers -- Especialidades borrowing the Doctores profile --
+                # and applying it relabels the sheet and writes the rows as the
+                # wrong kind with nothing blocking. So that one is left alone.
+                matching = [
+                    p
+                    for p in candidates
+                    if p.mapping.get("sheet") == report.sheet
+                    and p.mapping.get("source") == stored_name
+                ]
+            profile = matching[0] if len(matching) == 1 else None
             if profile is None:
                 mappings[report.sheet] = _default_mapping(report)
                 continue
@@ -892,8 +913,17 @@ async def commit(
                 db,
                 clinic_id=scope.clinic_id,
                 name=f"{record.filename} - {report.sheet}",
-                fingerprint=repository.header_fingerprint(sheet.headers),
-                mapping={"mapping": mapping, "entity": report.entity.value},
+                fingerprint=repository.header_fingerprint(sheet.headers, report.entity.value),
+                mapping={
+                    "mapping": mapping,
+                    "entity": report.entity.value,
+                    # Which sheet of which file this was confirmed for. The
+                    # filename matters because every uploaded CSV is parsed from
+                    # a temporary file called `upload`, so its sheet name alone
+                    # cannot tell two different CSVs apart.
+                    "sheet": report.sheet,
+                    "source": record.filename,
+                },
             )
 
     record.status = "committed"

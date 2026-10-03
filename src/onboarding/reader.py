@@ -167,6 +167,13 @@ class Sheet:
     rows: tuple[tuple[str, ...], ...]
     #: 1-based row in the source file where `headers` was found.
     header_row: int
+    #: The source-file row each entry of `rows` came from, in the same order.
+    #: Blank rows are dropped while reading, so position in `rows` is not the
+    #: row a reviewer sees: without this, a flag meant for a hidden row lands on
+    #: whichever row happens to sit at that offset. Empty means "numbered from
+    #: `header_row` + 1", which is the old behaviour and is right when no row
+    #: was dropped.
+    row_numbers: tuple[int, ...] = ()
     #: Rows the file marked hidden. Imported, but flagged: hiding a row is not
     #: deleting it, and dropping it silently would lose a real patient.
     hidden_row_numbers: tuple[int, ...] = ()
@@ -377,18 +384,27 @@ def sniff_delimiter(sample: str) -> str:
     return max(scored)[2]
 
 
-def _csv_rows(text: str, delimiter: str) -> list[list[str]]:
+def _csv_rows(text: str, delimiter: str, *, quoted: bool = True) -> list[list[str]]:
     """Parse with a field-size limit wide enough for a pasted clinical note.
 
     `csv` refuses a field over 128 KiB, and a receptionist pasting a long note
     into one cell is enough to hit it. The limit is raised for this parse only
     and restored afterwards, because it is process-global state and leaving it
     raised would weaken the guard for every other caller.
+
+    With `quoted=False` a quote character is just a character, which is how a
+    file holding one stray `"` is recovered: the default reading swallows every
+    line after it into a single cell.
     """
     previous = csv.field_size_limit()
     csv.field_size_limit(MAX_CSV_FIELD_BYTES)
     try:
-        return list(csv.reader(io.StringIO(text), delimiter=delimiter))
+        reader = (
+            csv.reader(io.StringIO(text), delimiter=delimiter)
+            if quoted
+            else csv.reader(io.StringIO(text), delimiter=delimiter, quoting=csv.QUOTE_NONE)
+        )
+        return list(reader)
     finally:
         csv.field_size_limit(previous)
 
@@ -477,9 +493,22 @@ def read_csv(path: Path, answers: Mapping[str, bool] | None = None) -> ReadResul
     elif encoding == "cp1252":
         warnings.append("Read as Windows-1252 (a Spanish Excel export). Check accented names.")
 
+    decided = dict(answers or {})
     delimiter = sniff_delimiter(text[:64_000])
+    # A cell that opens a quote and never closes it swallows every following
+    # line into itself, so three patients arrive as one row. The field-count
+    # warning that follows blames the row shape, which sends a reviewer to the
+    # wrong place, and nothing says the rows are gone. Reading the file again
+    # with quoting off recovers them, so the reviewer is asked which reading is
+    # right. Declining keeps the quoted reading, which is what we would have
+    # done unasked.
+    unbalanced = text.count('"') % 2 == 1
+    reparse_literally = unbalanced and bool(decided.get("csv.unbalanced_quote"))
     try:
-        rows = [tuple(cell.strip() for cell in row) for row in _csv_rows(text, delimiter)]
+        rows = [
+            tuple(cell.strip() for cell in row)
+            for row in _csv_rows(text, delimiter, quoted=not reparse_literally)
+        ]
     except csv.Error as error:
         # Every csv.Error we can predict is handled above, so reaching here means
         # the file is malformed in a way we have not seen. It is reported as
@@ -497,11 +526,29 @@ def read_csv(path: Path, answers: Mapping[str, bool] | None = None) -> ReadResul
     rows = [row for _, row in numbered]
 
     questions: list[StructureQuestion] = []
+    if unbalanced:
+        swallowed = sum(cell.count("\n") for row in rows for cell in row)
+        questions.append(
+            StructureQuestion(
+                id="csv.unbalanced_quote",
+                answered=decided.get("csv.unbalanced_quote"),
+                finding=(
+                    f'The file has an odd number of " characters, and {swallowed} '
+                    f"line(s) were read as part of a cell rather than as rows of "
+                    f"their own. A quote opened somewhere and was never closed."
+                ),
+                applied_if_approved=(
+                    'Read " as an ordinary character, recovering those lines as rows.'
+                ),
+                applied_if_declined=(
+                    "Keep the quoted reading, so those lines stay inside one cell."
+                ),
+            )
+        )
 
     # A preamble line above the table: taking row 1 on faith would read a clinic
     # name as the only column and lose every patient. Which row is the header is
     # a judgement, so it is asked rather than assumed.
-    decided = dict(answers or {})
     detected_header = _find_csv_header(rows)
 
     # A file whose very first row is data, with no headings anywhere, would have
@@ -597,6 +644,7 @@ def read_csv(path: Path, answers: Mapping[str, bool] | None = None) -> ReadResul
     header_question_pending = detected_header > 0 and "csv.header_row" not in decided
 
     body: list[tuple[str, ...]] = []
+    body_numbers: list[int] = []
     overlong: list[int] = []
     # Declining leaves the row out entirely rather than cutting cells off it.
     keep_overlong = bool(decided.get("csv.overlong_rows"))
@@ -617,6 +665,7 @@ def read_csv(path: Path, answers: Mapping[str, bool] | None = None) -> ReadResul
                 warnings.append(f"Row {number} has {len(row)} fields, expected {width}.")
             row = row[:width] + ("",) * max(0, width - len(row))
         body.append(row)
+        body_numbers.append(number)
 
     if overlong and not header_question_pending:
         shown = ", ".join(str(n) for n in overlong[:5])
@@ -649,6 +698,7 @@ def read_csv(path: Path, answers: Mapping[str, bool] | None = None) -> ReadResul
                 # so this reports 0: every data row still carries its own real
                 # line number, which is what a refusal points at.
                 header_row=0 if synthetic_header else line_numbers[header_index],
+                row_numbers=tuple(body_numbers),
                 warnings=tuple(warnings),
                 questions=tuple(questions),
             ),
@@ -883,6 +933,7 @@ def read_excel(path: Path, answers: Mapping[str, bool] | None = None) -> ReadRes
 
             width = len(headers)
             body: list[tuple[str, ...]] = []
+            body_numbers: list[int] = []
             uncalculated = 0
             data_rows = rows if synthetic_header else rows[1:]
             first_number = header_row if synthetic_header else header_row + 1
@@ -901,6 +952,10 @@ def read_excel(path: Path, answers: Mapping[str, bool] | None = None) -> ReadRes
                 cells.extend("" for _ in range(width - len(cells)))
                 if any(cells):
                     body.append(tuple(cells))
+                    # The worksheet row this came from. A blank row between two
+                    # patients is dropped here, so position in `body` stops
+                    # matching the row the sheet shows.
+                    body_numbers.append(row_number)
             if uncalculated:
                 sheet_warnings.append(
                     f"{uncalculated} cell(s) hold a formula with no calculated value; "
@@ -921,6 +976,7 @@ def read_excel(path: Path, answers: Mapping[str, bool] | None = None) -> ReadRes
                     headers=headers,
                     rows=tuple(body),
                     header_row=0 if synthetic_header else header_row,
+                    row_numbers=tuple(body_numbers),
                     hidden_row_numbers=hidden_rows,
                     hidden_columns=hidden_columns,
                     warnings=tuple(sheet_warnings),

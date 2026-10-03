@@ -611,3 +611,40 @@ def test_a_name_that_a_spreadsheet_would_run_is_questioned(value: str) -> None:
 def test_a_real_name_is_not_mistaken_for_a_formula(value: str) -> None:
     """The guard is on the leading character only; a hyphen inside a name is fine."""
     assert n.split_full_name(value).status is n.Status.VALID
+
+
+def test_formula_text_is_refused_in_fields_that_have_no_normalizer() -> None:
+    """The guard belonged to more than one field.
+
+    `split_full_name` refused a formula, but given_names, family_names, a
+    doctor's full_name and a specialty's name have no normalizer and were stored
+    as written, so the same payload reached the database through any of them.
+    """
+    from src.onboarding import canonical, service
+    from src.onboarding.canonical import Entity
+
+    payload = '=HYPERLINK("http://evil.example","Ana")'
+    for entity, field_name in (
+        (Entity.PATIENT, "given_names"),
+        (Entity.PATIENT, "family_names"),
+        (Entity.DOCTOR, "full_name"),
+        (Entity.SPECIALTY, "name"),
+    ):
+        field = canonical.field_for(entity, field_name)
+        assert field is not None, f"{entity.value}.{field_name} is gone"
+        outcome = service._apply(field, payload, n.DayFirst.UNDECIDED)
+        assert outcome.status is n.Status.REVIEW, f"{entity.value}.{field_name} accepted a formula"
+
+
+def test_an_ordinary_value_in_those_fields_still_imports() -> None:
+    from src.onboarding import canonical, service
+    from src.onboarding.canonical import Entity
+
+    for entity, field_name, value in (
+        (Entity.PATIENT, "given_names", "Ana María"),
+        (Entity.DOCTOR, "full_name", "Luis Pérez Gómez"),
+        (Entity.SPECIALTY, "name", "Cardiología"),
+    ):
+        field = canonical.field_for(entity, field_name)
+        assert field is not None
+        assert service._apply(field, value, n.DayFirst.UNDECIDED).status is n.Status.VALID

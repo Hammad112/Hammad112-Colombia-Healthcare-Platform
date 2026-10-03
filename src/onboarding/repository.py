@@ -43,16 +43,28 @@ from src.onboarding.service import RowResult
 from src.registry.models import Doctor, DocumentType, Patient, Specialty
 
 
-def header_fingerprint(headers: tuple[str, ...]) -> str:
-    """Identify "a file shaped like this one".
+def header_fingerprint(headers: tuple[str, ...], entity: str) -> str:
+    """Identify "a sheet of this kind, shaped like this one".
 
     Headers are normalized and sorted before hashing, so a clinic that reorders
     its columns, changes their capitalisation or adds an accent still matches
     the profile a person already confirmed. A file with genuinely different
-    columns gets a different fingerprint and is reviewed afresh.
+    columns gets a different fingerprint and is reviewed afresh: an exact set is
+    the point, because a near-miss key would apply a 12-column mapping to a
+    13-column file and map the new column to nothing without saying so.
+
+    `entity` is part of the key because headers alone do not identify a sheet.
+    A workbook whose Doctores and Especialidades sheets both read
+    ("Nombre", "Codigo") produced one fingerprint for both: the second overwrote
+    the first on commit, and the next upload applied the doctor mapping *and the
+    doctor entity* to the specialties sheet, pre-ticked "confirmed" with nothing
+    missing, so specialties were staged and written as doctors with no refusal
+    anywhere. Keying on the kind of sheet as well means one shape can carry one
+    profile per entity, and a lookup for a sheet of kind X can never return a
+    profile confirmed for kind Y.
     """
     normalized = sorted(normalize_header(h) for h in headers if h.strip())
-    return hashlib.sha256("\u001f".join(normalized).encode("utf-8")).hexdigest()
+    return hashlib.sha256("\u001f".join([entity, *normalized]).encode("utf-8")).hexdigest()
 
 
 # ----------------------------------------------------------------- sessions
@@ -309,16 +321,28 @@ async def save_profile(
     return profile
 
 
-async def find_profile(
-    session: AsyncSession, *, clinic_id: uuid.UUID, fingerprint: str
-) -> ImportProfile | None:
-    found: ImportProfile | None = await session.scalar(
+async def find_profiles_for_shape(
+    session: AsyncSession, *, clinic_id: uuid.UUID, headers: tuple[str, ...]
+) -> list[ImportProfile]:
+    """Every profile this clinic has confirmed for a sheet shaped like this one.
+
+    A list, not one row, because the entity is part of the key: a workbook whose
+    Doctores and Especialidades sheets share headers has one profile each, and
+    returning either of them on its own is how a sheet of specialties was
+    relabelled and written as doctors.
+
+    The caller decides what to do with more than one. It cannot be settled here:
+    a profile holds the entity a person *confirmed*, which outranks the guess we
+    arrive with, so the choice is only safe where the alternatives are visible.
+    """
+    candidates = [header_fingerprint(headers, entity.value) for entity in Entity]
+    result = await session.scalars(
         select(ImportProfile).where(
             ImportProfile.clinic_id == clinic_id,
-            ImportProfile.header_fingerprint == fingerprint,
+            ImportProfile.header_fingerprint.in_(candidates),
         )
     )
-    return found
+    return list(result.all())
 
 
 async def list_profiles(session: AsyncSession, *, clinic_id: uuid.UUID) -> list[ImportProfile]:
@@ -400,6 +424,7 @@ async def _apply_patients(
     created = updated = skipped = 0
     conflicts: list[str] = []
     accesses: list[Access] = []
+    overwritten: list[Access] = []
 
     for row in rows:
         if row.status.value != "valid":
@@ -441,7 +466,10 @@ async def _apply_patients(
                 session, clinic_id=clinic_id, patient_id=existing.id, values=values
             )
             updated += 1
-            accesses.append(
+            # An overwrite of a record the clinic already had is an update, not a
+            # creation. The commit message tells the receptionist this happened;
+            # the audit log has to agree with it.
+            overwritten.append(
                 Access(resource="patients", resource_id=str(existing.id), patient_id=existing.id)
             )
             continue
@@ -465,6 +493,8 @@ async def _apply_patients(
 
     if accesses:
         await record_accesses(session, AccessAction.CREATE, accesses)
+    if overwritten:
+        await record_accesses(session, AccessAction.UPDATE, overwritten)
     return ApplyResult(created, updated, skipped, tuple(conflicts))
 
 
@@ -511,18 +541,27 @@ async def _record_consent(
     if existing is not None:
         return
 
-    session.add(
-        Consent(
-            clinic_id=clinic_id,
-            patient_id=patient_id,
-            purpose=ConsentPurpose(str(purpose)),
-            channel=ConsentChannel.ANY,
-            granted_at=moment,
-            evidence_kind=EvidenceKind(str(evidence)),
-            # No evidence_ref: the document itself stayed with the clinic. The
-            # evidence_kind says what to go and ask for.
-            policy_version=IMPORTED_POLICY_VERSION,
-        )
+    consent = Consent(
+        clinic_id=clinic_id,
+        patient_id=patient_id,
+        purpose=ConsentPurpose(str(purpose)),
+        channel=ConsentChannel.ANY,
+        granted_at=moment,
+        evidence_kind=EvidenceKind(str(evidence)),
+        # No evidence_ref: the document itself stayed with the clinic. The
+        # evidence_kind says what to go and ask for.
+        policy_version=IMPORTED_POLICY_VERSION,
+    )
+    session.add(consent)
+    # Under its own resource, as every other consent write does. The enclosing
+    # patient's entry is not a substitute: in M4 the dispatch gate asks when and
+    # from where consent was recorded, and the import is the only route by which
+    # this row exists. Flushed first so the entry can name the row's id.
+    await session.flush()
+    await record_accesses(
+        session,
+        AccessAction.CREATE,
+        [Access(resource="consents", resource_id=str(consent.id), patient_id=patient_id)],
     )
 
 

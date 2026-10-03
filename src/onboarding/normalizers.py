@@ -88,6 +88,20 @@ DATE_RANGES: Final = {
 }
 
 
+def _years_from(day: dt.date, years: int) -> dt.date:
+    """`day` shifted by whole years, landing on 28 February from a leap day.
+
+    `date.replace(year=...)` raises on 29 February whenever the target year is
+    not a leap year, and `day` here is today's date from the clock. Without this
+    every import carrying a date column would answer HTTP 500 on 29 February and
+    on no other day, which no test can reach because the date is not an input.
+    """
+    try:
+        return day.replace(year=day.year + years)
+    except ValueError:
+        return day.replace(month=2, day=28, year=day.year + years)
+
+
 def plausible_date(value: dt.date, field_name: str, *, today: dt.date | None = None) -> str | None:
     """Why this date is implausible for this field, or None if it is fine.
 
@@ -98,8 +112,8 @@ def plausible_date(value: dt.date, field_name: str, *, today: dt.date | None = N
     if window is None:
         return None
     today = today or dt.datetime.now(tz=BOGOTA).date()
-    earliest = today.replace(year=today.year + window[0])
-    latest = today.replace(year=today.year + window[1])
+    earliest = _years_from(today, window[0])
+    latest = _years_from(today, window[1])
     if value < earliest:
         return (
             f"{value.isoformat()} is further back than a {field_name.replace('_', ' ')} "
@@ -530,7 +544,7 @@ class SplitName:
 #: Google Sheets. The whitespace leads are listed for completeness only: the
 #: collapse above strips them, so a cell beginning with one is already compared
 #: on the character behind it.
-_FORMULA_LEADS: Final = frozenset("""=+-@\t\r\n""")
+FORMULA_LEADS: Final = frozenset("""=+-@\t\r\n""")
 
 
 def split_full_name(raw: str) -> Outcome[SplitName]:
@@ -559,12 +573,19 @@ def split_full_name(raw: str) -> Outcome[SplitName]:
     # OWASP describes. Every other field rejects it by shape already. It goes to
     # review rather than invalid because the cell may be a real name the export
     # mangled, and only a person can say.
-    if text[0] in _FORMULA_LEADS:
-        return _review(
-            "name.looks_like_a_formula",
-            f"{raw!r} starts with {text[0]!r}, so a spreadsheet would read it as a "
-            "formula rather than a name. Confirm the real name.",
-        )
+    # Every token, not just the first. The name is split into two fields and each
+    # becomes a cell of its own, so "Perez, =HYPERLINK(...)" and "Carlos @SUM(1)"
+    # both put a formula in an output cell while the raw text starts with a
+    # letter. Checking the whole string once here covers every split branch below.
+    # Fields with no normalizer are guarded in `service._apply`'s as-written
+    # branch; this one is stricter because the value is split before storage.
+    for token in text.replace(",", " ").split():
+        if token[0] in FORMULA_LEADS:
+            return _review(
+                "name.looks_like_a_formula",
+                f"{raw!r} contains {token[0]!r} where a name should be, so a "
+                "spreadsheet would read it as a formula. Confirm the real name.",
+            )
 
     # "PEREZ GOMEZ, CARLOS ANDRES" is surnames first. The comma says so, which
     # makes this the one name shape that IS decidable -- and reading it
