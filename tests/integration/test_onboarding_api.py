@@ -363,12 +363,28 @@ async def test_every_imported_patient_is_audited(scoped: TestClient, session) ->
     assert created == 8
 
 
-async def test_a_second_import_reuses_the_confirmed_mapping(scoped: TestClient) -> None:
+async def test_a_second_import_reuses_the_confirmed_mapping(
+    scoped: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The PDF's exit criterion for repeat imports.
 
     The mapping a person confirmed is matched by the file's shape, so the same
-    export next month needs no review — and no model call.
+    export next month needs no review — and no model call. The second half of
+    that was a claim in this docstring and nothing more, so the model stage is
+    made to fail loudly here: if a repeat import reaches it, this test says so.
     """
+
+    def _refuse(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a repeat import asked a model about a confirmed column")
+
+    # The stage is off in tests because no key is configured, so patching
+    # `suggest` alone would assert nothing. It is switched on here precisely so
+    # that reaching it fails.
+    monkeypatch.setattr(
+        "src.core.config.Settings.mapping_llm_available", property(lambda self: True)
+    )
+    monkeypatch.setattr("src.onboarding.llm.suggest", _refuse)
+
     first = _upload(scoped, "1_clean_ips.xlsx")
     scoped.post(f"/onboarding/uploads/{first['session_id']}/validate")
     scoped.post(f"/onboarding/uploads/{first['session_id']}/commit")

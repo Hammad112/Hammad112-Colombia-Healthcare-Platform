@@ -98,6 +98,24 @@ async def test_measure_the_name_export_shapes(scoped: TestClient) -> None:
             f"review={result['review']:3d} invalid={result['invalid']:3d}"
         )
         assert result["rows"] == 8, f"{name} lost rows"
+        # Not just the count: the whole point of this measurement is that one
+        # combined name column costs a decision and separate columns do not. A
+        # version that guessed the split would still report 8 rows.
+        expected_review = 5 if name == "name_1_one_column.csv" else 0
+        assert result["review"] == expected_review, (
+            f"{name}: expected {expected_review} rows in review, got {result['review']}"
+        )
+
+
+#: What each export measures to, as quoted in the milestone report's table.
+#: Asserted rather than printed: these are the numbers the client is given, so a
+#: change in any of them is either a regression or a figure to correct.
+EXPECTED = {
+    "1_clean_ips.xlsx": {"sheets": 3, "rows": 20, "review": 4, "invalid": 0},
+    "3_excel_csv_es.csv": {"sheets": 1, "rows": 5, "review": 3, "invalid": 0},
+    "2_receptionist.xlsx": {"sheets": 2, "rows": 16, "review": 4, "invalid": 2},
+    "4_corrupted.xlsx": {"sheets": 1, "rows": 6, "review": 6, "invalid": 0},
+}
 
 
 async def test_measure_the_clinic_exports(scoped: TestClient) -> None:
@@ -108,3 +126,4 @@ async def test_measure_the_clinic_exports(scoped: TestClient) -> None:
             f"  {name:24s} sheets={result['sheets']} rows={result['rows']:3d} "
             f"review={result['review']:3d} invalid={result['invalid']:3d}"
         )
+        assert result == EXPECTED[name], name
