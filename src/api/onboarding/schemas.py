@@ -168,6 +168,15 @@ class CommitOut(BaseModel):
     session_id: uuid.UUID
     status: str
     committed: dict[str, int] = Field(description="Rows written, per sheet.")
+    created: dict[str, int] = Field(
+        default_factory=dict, description="Rows that became a new record, per sheet."
+    )
+    updated: dict[str, int] = Field(
+        default_factory=dict,
+        description="Rows that replaced an existing record, per sheet. A clinic that "
+        "has maintained a record by hand since the last import loses those edits, so "
+        "the count is reported separately rather than folded into `committed`.",
+    )
     skipped: dict[str, int] = Field(
         description="Rows not written per sheet, because they await review."
     )

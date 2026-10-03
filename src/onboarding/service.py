@@ -640,13 +640,22 @@ def report_from_dict(data: dict[str, Any]) -> SheetReport:
     )
 
 
-def apply_profile(report: SheetReport, mapping: dict[str, str | None]) -> SheetReport:
+def apply_profile(
+    report: SheetReport, mapping: dict[str, str | None], entity: Entity | None = None
+) -> SheetReport:
     """Re-state a report under a mapping a person confirmed.
 
     A confirmed column is no longer a proposal, so its confidence becomes
     "confirmed" and it is pre-ticked. A column the reviewer cleared is shown as
     deliberately not imported, rather than as something the matcher failed on.
+
+    `entity` is the sheet type the reviewer confirmed. It must be restored here
+    rather than left to the heuristic: a sheet named AGENDA holding patients is
+    guessed as `appointment` on every upload, and the stored mapping then targets
+    fields the guessed entity does not have. It is also what `missing_required`
+    below is computed against, so it has to be settled before that runs.
     """
+    entity = entity or report.entity
     columns = tuple(
         ColumnReport(
             column=c.column,
@@ -667,16 +676,20 @@ def apply_profile(report: SheetReport, mapping: dict[str, str | None]) -> SheetR
     )
     assigned = {target for target in mapping.values() if target}
     missing = tuple(
-        name for name in (f.name for f in required_fields(report.entity)) if name not in assigned
+        name for name in (f.name for f in required_fields(entity)) if name not in assigned
     )
-    if report.entity is Entity.PATIENT and (
+    if entity is Entity.PATIENT and (
         "full_name" in assigned or {"given_names", "family_names"} <= assigned
     ):
         missing = tuple(m for m in missing if m not in {"full_name", "given_names", "family_names"})
     return SheetReport(
         sheet=report.sheet,
-        entity=report.entity,
-        entity_reason=report.entity_reason,
+        entity=entity,
+        entity_reason=(
+            report.entity_reason
+            if entity is report.entity
+            else "Confirmed for this clinic on an earlier import."
+        ),
         columns=columns,
         missing_required=missing,
         total_rows=report.total_rows,

@@ -52,6 +52,22 @@ async def scoped(session, client: TestClient) -> Iterator[TestClient]:  # type: 
     yield scope_client(client, graph)
 
 
+async def _patient_count(session, client: TestClient) -> int:  # type: ignore[no-untyped-def]
+    """How many patients this clinic can see, right now.
+
+    A refusal has to be proven against the database. Asserting HTTP 409 alone
+    would also pass for a commit that wrote every row and then refused.
+    """
+    from sqlalchemy import func, select
+
+    from src.registry.models import Patient
+
+    await session.commit()
+    await apply_clinic_scope(session, ClinicScope(clinic_id=_clinic_of(client)))
+    count: int = await session.scalar(select(func.count()).select_from(Patient))
+    return count
+
+
 def _clinic_of(client: TestClient) -> uuid.UUID:
     """The clinic the scoped client sends on every request."""
     return uuid.UUID(str(client.params["clinic_id"]))
@@ -166,7 +182,7 @@ async def test_rows_needing_review_explain_themselves(scoped: TestClient) -> Non
 
 
 # ------------------------------------------------- the guarantee that matters
-async def test_commit_refuses_while_a_question_is_unanswered(scoped: TestClient) -> None:
+async def test_commit_refuses_while_a_question_is_unanswered(scoped: TestClient, session) -> None:  # type: ignore[no-untyped-def]
     """The corrupted fixture's birth dates are genuinely ambiguous.
 
     An earlier version counted invalid rows only, so this file — blocked on an
@@ -178,9 +194,12 @@ async def test_commit_refuses_while_a_question_is_unanswered(scoped: TestClient)
     assert validation["can_commit"] is False
     assert validation["blocking"]
 
+    before = await _patient_count(session, scoped)
     response = scoped.post(f"/onboarding/uploads/{body['session_id']}/commit")
     assert response.status_code == 409
     assert "Refusing to commit" in response.json()["detail"]
+    # The exit criterion is that nothing is written, which only a count can show.
+    assert await _patient_count(session, scoped) == before
 
 
 async def test_commit_refuses_before_validation_has_run(scoped: TestClient) -> None:
@@ -1151,7 +1170,7 @@ async def test_utf16_csv_imports_rather_than_being_read_as_garbage(
 
 
 # ------------- exit criterion: nothing commits that fails validation
-async def test_a_duplicated_patient_blocks_the_commit(scoped: TestClient) -> None:
+async def test_a_duplicated_patient_blocks_the_commit(scoped: TestClient, session) -> None:  # type: ignore[no-untyped-def]
     """Two rows with one cedula would write the same patient twice.
 
     `_apply_patients` matches on the document pair, so the second row updates the
@@ -1174,8 +1193,17 @@ async def test_a_duplicated_patient_blocks_the_commit(scoped: TestClient) -> Non
         validation["blocking"]
     )
 
+    before = await _patient_count(session, scoped)
     refused = scoped.post(f"/onboarding/uploads/{session_id}/commit")
     assert refused.status_code == 409
+    # The refusal must be the duplicate, not the generic "validate it first".
+    # Both guards answer 409, so without this the test passes when the guard it
+    # exists for has been removed, and only the status guard is holding.
+    assert "Refusing to commit" in refused.json()["detail"]
+    assert "row 4" in refused.json()["detail"], refused.json()["detail"]
+    # The status code is not the guarantee. A commit that wrote the rows and then
+    # answered 409 would satisfy the assertions above and lose the clinic's data.
+    assert await _patient_count(session, scoped) == before
 
 
 async def test_the_same_number_under_two_document_types_still_imports(
@@ -1823,3 +1851,73 @@ async def test_a_large_export_still_imports(scoped: TestClient) -> None:
 
     body = _upload_bytes(scoped, "large.csv", header + rows)
     assert sum(s["total_rows"] for s in body["sheets"]) == 30000
+
+
+async def test_a_corrected_sheet_type_survives_the_next_upload(scoped: TestClient) -> None:
+    """Exit criterion 3, for a file that actually needs the sheet type corrected.
+
+    The criterion-3 test above uses a file whose sheets the heuristic already
+    guesses right, so it passed while the confirmed entity was written to the
+    profile and never read back. Here AGENDA holds patients and is guessed
+    `appointment`. Without the entity in the profile the second upload guesses
+    again, and the stored mapping then targets fields that entity does not have.
+    """
+    first = _upload(scoped, "2_receptionist.xlsx")
+    session_id = first["session_id"]
+    agenda = next(s for s in first["sheets"] if s["sheet"] == "AGENDA")
+    assert agenda["entity"] == "appointment", "fixture changed; this test needs a wrong guess"
+
+    scoped.put(
+        f"/onboarding/uploads/{session_id}/mapping",
+        json={"sheet": "AGOSTO (viejo)", "mapping": {}, "entity": "skip"},
+    )
+    corrected = scoped.put(
+        f"/onboarding/uploads/{session_id}/mapping",
+        json={
+            "sheet": "AGENDA",
+            "mapping": {},
+            "entity": "patient",
+            "excluded_rows": [17, 18, 19, 20],
+        },
+    )
+    assert corrected.status_code == 200, corrected.text
+    scoped.post(f"/onboarding/uploads/{session_id}/validate")
+    committed = scoped.post(f"/onboarding/uploads/{session_id}/commit")
+    assert committed.status_code == 200, committed.text
+
+    second = _upload(scoped, "2_receptionist.xlsx")
+    again = next(s for s in second["sheets"] if s["sheet"] == "AGENDA")
+    assert again["entity"] == "patient", (
+        "the confirmed sheet type was lost; the profile stored it but nobody read it back"
+    )
+    assert "AGENDA" in second["reused_profiles"]
+
+
+async def test_overwriting_an_existing_patient_is_reported_not_hidden(
+    scoped: TestClient,
+) -> None:
+    """A replaced record is not the same event as a new one, and must not read as one.
+
+    `committed` once reported created + updated as a single number, so importing
+    a file that overlaps the clinic's existing patients said "committed 8" while
+    writing one and replacing seven. Anything a receptionist had corrected by
+    hand in those seven was gone, with nothing on screen to say so.
+    """
+    first = _upload(scoped, "1_clean_ips.xlsx")
+    scoped.post(f"/onboarding/uploads/{first['session_id']}/validate")
+    begin = scoped.post(f"/onboarding/uploads/{first['session_id']}/commit")
+    assert begin.status_code == 200, begin.text
+    assert sum(begin.json()["created"].values()) > 0
+    assert sum(begin.json()["updated"].values()) == 0, "nothing existed to replace yet"
+
+    # The same export again: every patient already exists, so every row replaces.
+    second = _upload(scoped, "1_clean_ips.xlsx")
+    scoped.post(f"/onboarding/uploads/{second['session_id']}/validate")
+    again = scoped.post(f"/onboarding/uploads/{second['session_id']}/commit")
+    assert again.status_code == 200, again.text
+
+    body = again.json()
+    assert sum(body["updated"].values()) > 0, "replacements were not counted"
+    assert sum(body["created"].values()) == 0, "nothing should be new the second time"
+    assert "replaced" in body["message"], body["message"]
+    assert "overwritten" in body["message"], body["message"]

@@ -46,6 +46,7 @@ from src.api.onboarding.schemas import (
 from src.onboarding import repository, service
 from src.onboarding.canonical import Entity
 from src.onboarding.matcher import SHARED_FIELDS
+from src.onboarding.models import ImportProfile
 from src.onboarding.reader import ReadResult, UnreadableFile, read_isolated
 
 router = APIRouter()
@@ -132,6 +133,22 @@ def _readable_size(limit: int) -> str:
     return f"{limit / 1024:.0f} KB"
 
 
+def _stored_entity(profile: ImportProfile) -> Entity | None:
+    """The sheet type a reviewer confirmed, or None if the profile predates it.
+
+    Profiles written before the entity was stored hold only the mapping, so a
+    missing or unrecognised value falls back to the heuristic rather than
+    failing the upload.
+    """
+    stored = profile.mapping.get("entity")
+    if not isinstance(stored, str):
+        return None
+    try:
+        return Entity(stored)
+    except ValueError:
+        return None
+
+
 def _default_mapping(report: service.SheetReport) -> dict[str, str | None]:
     """What the reviewer sees pre-ticked: confident proposals only."""
     return {c.column: (c.target_field if c.auto else None) for c in report.columns}
@@ -215,7 +232,13 @@ async def upload(
                 continue
             stored = dict(profile.mapping.get("mapping", {}))
             mappings[report.sheet] = {c.column: stored.get(c.column) for c in report.columns}
-            reports[index] = service.apply_profile(report, mappings[report.sheet])
+            # The profile stores the sheet type the reviewer confirmed. Without
+            # it the heuristic runs again on every upload, so a sheet named
+            # AGENDA that actually holds patients comes back as `appointment`
+            # and the stored mapping targets fields that entity does not have.
+            reports[index] = service.apply_profile(
+                report, mappings[report.sheet], _stored_entity(profile)
+            )
             reused.append(report.sheet)
 
         previous = await repository.find_previous_import(
@@ -811,6 +834,8 @@ async def commit(
         raise HTTPException(status.HTTP_409_CONFLICT, "Validate the import before committing it.")
 
     committed: dict[str, int] = {}
+    created: dict[str, int] = {}
+    updated: dict[str, int] = {}
     skipped: dict[str, int] = {}
     conflicts: list[str] = []
 
@@ -837,6 +862,12 @@ async def commit(
             db, clinic_id=scope.clinic_id, entity=report.entity, rows=rows
         )
         committed[report.sheet] = applied.created + applied.updated
+        # Kept apart on purpose. An updated row replaced a record the clinic
+        # already had, and anything a receptionist edited by hand since the last
+        # import is gone. One combined number reads as "8 patients imported"
+        # whether that is 8 new or 1 new and 7 overwritten.
+        created[report.sheet] = applied.created
+        updated[report.sheet] = applied.updated
         skipped[report.sheet] = applied.skipped
         conflicts.extend(applied.conflicts)
 
@@ -852,20 +883,32 @@ async def commit(
     record.status = "committed"
     await db.flush()
 
+    total_created = sum(created.values())
+    total_updated = sum(updated.values())
+    saved = " The mapping was saved for the next file of this shape." if save_profile else ""
+    if total_created or total_updated:
+        # Overwrites are named, because the clinic cannot see them any other way.
+        written = f"Imported {total_created} new record(s)"
+        if total_updated:
+            written += (
+                f" and replaced {total_updated} existing one(s). Anything edited by "
+                "hand in those records since the last import has been overwritten"
+            )
+        message = f"{written}. Rows awaiting review were not written.{saved}"
+    else:
+        # "Imported." for a commit that wrote nothing tells a receptionist the
+        # opposite of what happened.
+        message = f"Nothing was written: every row is awaiting review or was excluded.{saved}"
+
     return CommitOut(
         session_id=record.id,
         status=record.status,
         committed=committed,
+        created=created,
+        updated=updated,
         skipped=skipped,
         conflicts=conflicts,
-        message=(
-            "Imported. Rows awaiting review were not written"
-            + (
-                ", and the mapping was saved for the next file of this shape."
-                if save_profile
-                else "."
-            )
-        ),
+        message=message,
     )
 
 

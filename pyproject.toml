@@ -107,6 +107,14 @@ warn_unused_ignores = true
 module = ["faker.*"]
 ignore_missing_imports = true
 
+# `resource` is POSIX only, and mypy type-checks one platform at a time. The
+# `attr-defined` ignores in `_limit_child` are required on Windows and unused on
+# Linux, so whichever platform CI runs on, strict `warn_unused_ignores` fails the
+# other. The suppression is scoped to the one module that imports `resource`.
+[[tool.mypy.overrides]]
+module = ["src.onboarding.reader"]
+warn_unused_ignores = false
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
