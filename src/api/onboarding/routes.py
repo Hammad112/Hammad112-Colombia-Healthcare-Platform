@@ -897,6 +897,13 @@ async def commit(
             )
 
     record.status = "committed"
+    # Kept so the review screen can say what the import actually did. Without it
+    # the page says only "committed", and the counts live in an API response the
+    # receptionist never sees.
+    record.report = {
+        **(record.report or {}),
+        "outcome": {"created": created, "updated": updated, "skipped": skipped},
+    }
     await db.flush()
 
     total_created = sum(created.values())

@@ -70,6 +70,27 @@ code { font-family:ui-monospace,Consolas,monospace; font-size:13px; }
 """
 
 
+def _answer_hint(reason: str) -> str:
+    """What to type back, for the refusals a reviewer actually meets.
+
+    An empty box with no hint is the reason a receptionist stalls on a name: the
+    importer wants "Surnames, Given names", and nothing on screen said so.
+    """
+    text = reason.casefold()
+    if "surname" in text or "split" in text:
+        return "Surnames, Given names"
+    if "reached" in text or "phone" in text:
+        return "A reachable number, e.g. 3101234567"
+    if "year" in text or "date" in text:
+        return "yyyy-mm-dd"
+    return ""
+
+
+def _slug(value: str) -> str:
+    """An id for a sheet anchor. Sheet names carry spaces, accents and brackets."""
+    return re.sub(r"[^a-z0-9]+", "-", value.casefold()).strip("-") or "sheet"
+
+
 def _escape(value: object) -> str:
     return html.escape(str(value), quote=True)
 
@@ -153,7 +174,7 @@ def _sheet_section(report: service.SheetReport, session_id: uuid.UUID, clinic_id
     )
 
     return f"""
-    <h2>{_escape(report.sheet)}</h2>
+    <h2 id="sheet-{_slug(report.sheet)}">{_escape(report.sheet)}</h2>
     <p class="sub">Read as <strong>{_escape(report.entity.value)}</strong> —
        {_escape(report.entity_reason)}<br>{counts}</p>
     {"".join(blocks)}
@@ -171,7 +192,9 @@ def _sheet_section(report: service.SheetReport, session_id: uuid.UUID, clinic_id
         <tr><th>Column in the file</th><th>Import as</th><th>Valid</th><th>Why</th></tr>
         {rows}
       </table>
-      <p><button type="submit">Save this sheet</button></p>
+      <p><button type="submit">Save this sheet</button>
+         <span class="note">Saves this sheet only. Changes typed into another
+         sheet below are not saved until you press its own button.</span></p>
     </form>
     """
 
@@ -193,9 +216,13 @@ def _review_rows(rows: list[Any], session_id: uuid.UUID, clinic_id: uuid.UUID) -
         reasons = "".join(f"<li>{_escape(r)}</li>" for r in review_reasons)
         # The column each reason names, so the reviewer answers that cell.
         columns = [r.split(":")[0] for r in review_reasons if ":" in r]
+        # The reason names the column; the reason's text says what is wrong with
+        # it, which is what tells the reviewer the shape to type back.
+        hint_for = {r.split(":")[0]: _answer_hint(r) for r in review_reasons if ":" in r}
         inputs = "".join(
             f'<label class="note">{_escape(column)}: '
-            f'<input name="cell::{_escape(column)}" style="width:18em;padding:5px">'
+            f'<input name="cell::{_escape(column)}" style="width:18em;padding:5px"'
+            f' placeholder="{_escape(hint_for.get(column, ""))}">'
             "</label><br>"
             for column in dict.fromkeys(columns)
         )
@@ -307,7 +334,23 @@ async def review_screen(
             f"<ul>{items}</ul></div>"
         )
     elif record.status == "committed":
-        banner = '<div class="card"><strong>This import has been committed.</strong></div>'
+        outcome = stored.get("outcome", {})
+        made = sum((outcome.get("created") or {}).values())
+        replaced = sum((outcome.get("updated") or {}).values())
+        held = sum((outcome.get("skipped") or {}).values())
+        detail = f"{made} new record(s) written"
+        if replaced:
+            # Named, because it is the one outcome a clinic cannot see otherwise.
+            detail += (
+                f", {replaced} existing one(s) replaced -- anything edited by hand "
+                "in those since the last import has been overwritten"
+            )
+        if held:
+            detail += f", {held} row(s) left for review"
+        banner = (
+            f'<div class="card"><strong>This import has been committed.</strong> '
+            f"{_escape(detail)}.</div>"
+        )
     elif record.status == "validated":
         banner = (
             '<div class="card"><strong>Ready to import.</strong> Rows awaiting review '
@@ -581,8 +624,11 @@ async def review_save_mapping(
             excluded_rows=excluded,
         ),
     )
+    # Back to the sheet just saved. Without the anchor every action returns the
+    # reviewer to the top of a long page, and on a multi-sheet workbook they
+    # scroll back to where they were after each save.
     return RedirectResponse(
-        f"/onboarding/uploads/{session_id}/review?clinic_id={scope.clinic_id}",
+        f"/onboarding/uploads/{session_id}/review?clinic_id={scope.clinic_id}#sheet-{_slug(sheet)}",
         status_code=status.HTTP_303_SEE_OTHER,
     )
 

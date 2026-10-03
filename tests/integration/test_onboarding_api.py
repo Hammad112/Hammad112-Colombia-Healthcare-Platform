@@ -21,9 +21,11 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.crypto import blind_index
 from src.core.tenancy import ClinicScope, apply_clinic_scope
 from src.core.timezones import BOGOTA
 from src.identity.models import Consent, ConsentChannel, ConsentPurpose, EvidenceKind
+from src.registry.models import DocumentType, Patient
 from tests.integration.factories import create_graph, scope_client
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "onboarding"
@@ -670,7 +672,7 @@ async def test_rows_below_the_table_can_be_excluded(scoped: TestClient) -> None:
     assert cleaned["can_commit"] is True, cleaned["blocking"]
 
 
-async def test_a_third_differently_structured_file_imports(scoped: TestClient) -> None:
+async def test_a_third_differently_structured_file_imports(scoped: TestClient, session) -> None:  # type: ignore[no-untyped-def]
     """The milestone's exit criterion, run end to end as a reviewer would.
 
     Three files of unrelated shapes — a clean IPS export, a receptionist's
@@ -706,7 +708,26 @@ async def test_a_third_differently_structured_file_imports(scoped: TestClient) -
     assert response.status_code == 200, response.text
     committed["2_receptionist.xlsx"] = response.json()["committed"]["AGENDA"]
 
-    assert all(count > 0 for count in committed.values()), committed
+    # A count above zero would pass with 1 of 11 rows imported, which is the
+    # failure this milestone exists to prevent. Each file's expected total is
+    # named, and what landed is checked against the field it belongs in.
+    assert committed == {
+        "1_clean_ips.xlsx": 12,
+        "3_excel_csv_es.csv": 2,
+        "2_receptionist.xlsx": 7,
+    }, committed
+
+    await session.commit()
+    await apply_clinic_scope(session, ClinicScope(clinic_id=_clinic_of(scoped)))
+    ana = await session.scalar(
+        select(Patient).where(Patient.document_number_bidx == blind_index("1020304050"))
+    )
+    assert ana is not None, "the patient the files share was not written"
+    # Values in the right columns, not merely a row count: an import that put
+    # every cell one field to the left would satisfy a count.
+    assert ana.document_type == DocumentType.CC
+    assert ana.document_number == "1020304050"
+    assert ana.phone_e164 is not None and ana.phone_e164.startswith("+57")
 
 
 async def test_the_messy_workbook_is_fixed_entirely_from_the_screen(

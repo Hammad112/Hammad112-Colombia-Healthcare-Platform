@@ -582,3 +582,32 @@ def test_an_appointment_next_year_is_not_questioned() -> None:
 
 def test_a_field_with_no_range_is_never_questioned() -> None:
     assert n.plausible_date(dt.date(1, 1, 1), "some_other_field", today=_TODAY) is None
+
+
+# ------------------------------------------- a name is the one free-text field
+# Every other field rejects formula text by shape. A name does not, so
+# `=HYPERLINK("http://evil.example","x")` was stored as a patient's given names:
+# inert in the database, executable the moment anyone exports or opens the sheet.
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '=HYPERLINK("http://evil.example","x")',
+        "+cmd|' /C calc'!A0",
+        "@SUM(1)",
+        "-2+3",
+    ],
+)
+def test_a_name_that_a_spreadsheet_would_run_is_questioned(value: str) -> None:
+    outcome = n.split_full_name(value)
+    assert outcome.status is n.Status.REVIEW
+    assert outcome.rule == "name.looks_like_a_formula"
+
+
+@pytest.mark.parametrize(
+    "value", ["Ana Perez", "Jean-Luc Picard", "O'Brien Smith", "PEREZ GOMEZ, CARLOS ANDRES"]
+)
+def test_a_real_name_is_not_mistaken_for_a_formula(value: str) -> None:
+    """The guard is on the leading character only; a hyphen inside a name is fine."""
+    assert n.split_full_name(value).status is n.Status.VALID

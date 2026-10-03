@@ -526,6 +526,13 @@ class SplitName:
     family_names: str
 
 
+#: Leading characters that make a cell a formula in Excel, LibreOffice and
+#: Google Sheets. The whitespace leads are listed for completeness only: the
+#: collapse above strips them, so a cell beginning with one is already compared
+#: on the character behind it.
+_FORMULA_LEADS: Final = frozenset("""=+-@\t\r\n""")
+
+
 def split_full_name(raw: str) -> Outcome[SplitName]:
     """Split one name column into given names and surnames, or refuse.
 
@@ -545,6 +552,19 @@ def split_full_name(raw: str) -> Outcome[SplitName]:
     text = " ".join(raw.split())
     if not text:
         return _review("name.empty", "No name given.")
+
+    # A name is the one free-text field here, and a cell beginning with one of
+    # these is a formula to Excel, LibreOffice and Sheets. Stored as a name it
+    # is inert; exported or opened later it executes, which is the CSV injection
+    # OWASP describes. Every other field rejects it by shape already. It goes to
+    # review rather than invalid because the cell may be a real name the export
+    # mangled, and only a person can say.
+    if text[0] in _FORMULA_LEADS:
+        return _review(
+            "name.looks_like_a_formula",
+            f"{raw!r} starts with {text[0]!r}, so a spreadsheet would read it as a "
+            "formula rather than a name. Confirm the real name.",
+        )
 
     # "PEREZ GOMEZ, CARLOS ANDRES" is surnames first. The comma says so, which
     # makes this the one name shape that IS decidable -- and reading it
