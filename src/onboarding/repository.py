@@ -609,6 +609,36 @@ async def doctor_reference_values(session: AsyncSession, *, clinic_id: uuid.UUID
     return {value for row in rows for value in row if value}
 
 
+async def existing_patient_documents(
+    session: AsyncSession, *, clinic_id: uuid.UUID, document_numbers: set[str]
+) -> set[str]:
+    """Which of these document numbers the clinic already holds a patient for.
+
+    An appointments sheet usually names patients imported on an earlier run, so
+    checking only the current file rejects every one of them. Soft-deleted
+    patients are excluded: a deletion is normally a privacy request, and an
+    appointment naming one has to reach a person rather than resolve quietly.
+
+    Matching is by blind index, and only the numbers the caller already supplied
+    are returned. Nothing is decrypted and no identifier the caller did not have
+    is disclosed, so this records no audit entry.
+    """
+    if not document_numbers:
+        return set()
+
+    by_index = {blind_index(number): number for number in document_numbers}
+    found = (
+        await session.scalars(
+            select(Patient.document_number_bidx).where(
+                Patient.clinic_id == clinic_id,
+                Patient.deleted_at.is_(None),
+                Patient.document_number_bidx.in_(by_index.keys()),
+            )
+        )
+    ).all()
+    return {by_index[index] for index in found if index in by_index}
+
+
 async def _apply_doctors(
     session: AsyncSession, *, clinic_id: uuid.UUID, rows: list[RowResult]
 ) -> ApplyResult:

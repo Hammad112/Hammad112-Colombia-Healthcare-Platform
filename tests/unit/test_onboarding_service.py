@@ -191,3 +191,28 @@ def test_four_name_columns_still_join_after_the_dedupe() -> None:
     rows, _ = service.validate(sheet, Entity.PATIENT, mapping, decisions={})
     assert rows[0].values["given_names"] == "Carlos Andres"
     assert rows[0].values["family_names"] == "Perez Gomez"
+
+
+# ------------------------------------------------- an empty cell is not a value
+# `str(None)` is "None", which is not empty and survives `.strip()`. Both checks
+# below treated that as a real value: one told a receptionist a doctor named
+# 'None' was missing, the other called two rows duplicates of each other because
+# both were missing the same identifier.
+
+
+def test_an_empty_reference_is_not_reported_as_a_doctor_called_none() -> None:
+    rows = [_appointment(2, doctor_ref=None, patient_document="1020304050")]
+    dangling = service.find_dangling_references(
+        rows,
+        Entity.APPOINTMENT,
+        known={"doctor_ref": set(), "patient_document": {"1020304050"}},
+    )
+    assert dangling == {}, dangling
+
+
+def test_two_rows_missing_the_same_identifier_are_not_duplicates() -> None:
+    rows = [
+        _patient(2, document_type="CC", document_number=None),
+        _patient(3, document_type="CC", document_number=None),
+    ]
+    assert service.find_duplicates(rows, Entity.PATIENT) == {}

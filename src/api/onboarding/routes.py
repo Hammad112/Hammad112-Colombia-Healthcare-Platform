@@ -345,6 +345,22 @@ async def _known_references(
     for doctor in await repository.doctor_reference_values(db, clinic_id=clinic_id):
         doctors.add(doctor.casefold())
 
+    # Patients the clinic already holds count too, and for the same reason as
+    # doctors: an appointments sheet names the people imported last month, so
+    # checking only this file rejects every one of them. The lookup matches by
+    # blind index and returns nothing the caller did not already supply.
+    wanted = {
+        str(row.values.get("patient_document", "")).strip()
+        for report, rows in converted
+        if report.entity is Entity.APPOINTMENT
+        for row in rows
+        if str(row.values.get("patient_document", "")).strip()
+    }
+    for number in await repository.existing_patient_documents(
+        db, clinic_id=clinic_id, document_numbers=wanted - patients
+    ):
+        patients.add(number.casefold())
+
     return {"doctor_ref": doctors, "patient_document": patients}
 
 

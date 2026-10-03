@@ -404,6 +404,17 @@ def validate(
                 row.errors.append(f"{column}: {outcome.message}")
             else:
                 row.reviews.append(f"{column}: {outcome.message}")
+
+        # The reader's warning says hidden rows are "imported and flagged for
+        # review", and until this was added nothing flagged them: a hidden row
+        # whose cells all converted was committed as valid. Hiding a row is not
+        # deleting it, and the usual reason is a cancellation the clinic never
+        # removed, so a person decides.
+        if offset in sheet.hidden_row_numbers:
+            row.reviews.append(
+                "This row is hidden in the file. Hiding is not deleting, so confirm "
+                "whether it should be imported."
+            )
         rows.append(row)
 
     # In the file's own column order, and including the columns nobody mapped.
@@ -530,7 +541,12 @@ def find_duplicates(rows: list[RowResult], entity: Entity) -> dict[int, str]:
     first_seen: dict[tuple[str, ...], int] = {}
     duplicates: dict[int, str] = {}
     for row in rows:
-        key = tuple(str(row.values.get(f, "")).strip().casefold() for f in fields)
+        # An empty cell is None, and `str(None)` is "none" after casefolding:
+        # it passes the `all(key)` check below, so two rows missing the same
+        # identifier would be reported as duplicates of each other.
+        key = tuple(
+            "" if (v := row.values.get(f)) is None else str(v).strip().casefold() for f in fields
+        )
         if not all(key):
             continue
         if key in first_seen:
@@ -562,7 +578,10 @@ def find_dangling_references(
     dangling: dict[int, str] = {}
     for row in rows:
         for field_name, label in checks:
-            value = str(row.values.get(field_name, "")).strip()
+            raw = row.values.get(field_name)
+            # `str(None)` is "None", which is not empty, so an empty cell was
+            # reported to the receptionist as a missing doctor named 'None'.
+            value = "" if raw is None else str(raw).strip()
             if not value:
                 continue  # an absent reference is a per-cell concern, not this one
             if value.casefold() not in known.get(field_name, set()):

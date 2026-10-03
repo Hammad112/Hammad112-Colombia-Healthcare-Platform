@@ -22,6 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.tenancy import ClinicScope, apply_clinic_scope
+from src.core.timezones import BOGOTA
 from src.identity.models import Consent, ConsentChannel, ConsentPurpose, EvidenceKind
 from tests.integration.factories import create_graph, scope_client
 
@@ -745,10 +746,10 @@ async def test_a_reviewer_can_answer_a_row_the_file_cannot_decide(
 ) -> None:
     """The last step of the workflow: a refusal a person can actually resolve.
 
-    Three of AGENDA's rows are correctly refused — two unassigned phone
-    prefixes and a three-word name that splits two ways. Refusing is right, but
-    without this endpoint those rows could never import, and "correct refusal"
-    would just mean "permanently stuck".
+    Rows of AGENDA are correctly held back: an unassigned phone prefix and a
+    three-word name that splits two ways, plus two rows the file hides. Holding
+    them back is right, but without this endpoint they could never import, and
+    "correct refusal" would just mean "permanently stuck".
     """
     body = _upload(scoped, "2_receptionist.xlsx")
     session_id = body["session_id"]
@@ -770,7 +771,10 @@ async def test_a_reviewer_can_answer_a_row_the_file_cannot_decide(
     review = scoped.get(
         f"/onboarding/uploads/{session_id}/rows", params={"status": "review"}
     ).json()
-    assert len(review) == 3
+    # 10 and 11 are cell refusals a correction resolves. 15 and 16 are hidden in
+    # the file, which is a question about the row rather than about a cell, so
+    # the reviewer answers those by excluding them instead.
+    assert {r["row_number"] for r in review} == {10, 11, 15, 16}
 
     for row in review:
         cells = {}
@@ -779,12 +783,24 @@ async def test_a_reviewer_can_answer_a_row_the_file_cannot_decide(
                 cells["CELULAR"] = "3101234567"  # a reachable prefix
             elif reason.startswith("NOMBRE COMPLETO"):
                 cells["NOMBRE COMPLETO"] = "Zzyzx Sentinelensen Marcadorez Prueba"
+        if not cells:
+            continue  # a hidden row has nothing to correct; it is kept or left out
         response = scoped.post(
             f"/onboarding/uploads/{session_id}/rows/correct",
             json={"sheet": "AGENDA", "row_number": row["row_number"], "cells": cells},
         )
         assert response.status_code == 200, response.text
 
+    scoped.put(
+        f"/onboarding/uploads/{session_id}/mapping",
+        json={
+            "sheet": "AGENDA",
+            "mapping": {},
+            "entity": "patient",
+            "excluded_rows": [15, 16, 17, 18, 19, 20],
+        },
+    )
+    scoped.post(f"/onboarding/uploads/{session_id}/validate")
     still_open = scoped.get(
         f"/onboarding/uploads/{session_id}/rows", params={"status": "review"}
     ).json()
@@ -792,7 +808,8 @@ async def test_a_reviewer_can_answer_a_row_the_file_cannot_decide(
 
     committed = scoped.post(f"/onboarding/uploads/{session_id}/commit")
     assert committed.status_code == 200, committed.text
-    assert committed.json()["committed"]["AGENDA"] == 11
+    # Nine, not eleven: the two hidden rows were deliberately left out.
+    assert committed.json()["committed"]["AGENDA"] == 9
     assert committed.json()["skipped"]["AGENDA"] == 0
 
 
@@ -890,6 +907,16 @@ async def test_a_refused_row_can_be_answered_from_the_screen(scoped: TestClient)
             data=data,
             follow_redirects=False,
         )
+
+    # Rows 15 and 16 are hidden in the file. That is a question about the row,
+    # not about a cell, so it is answered the way a receptionist answers it:
+    # by typing them into "rows to leave out".
+    scoped.post(
+        f"/onboarding/uploads/{session_id}/review/AGENDA",
+        data={"entity": "patient", "exclude": "15, 16, 17, 18, 19 y 20"},
+        follow_redirects=False,
+    )
+    scoped.post(f"/onboarding/uploads/{session_id}/review/validate", follow_redirects=False)
 
     page = scoped.get(f"/onboarding/uploads/{session_id}/review").text
     assert "Rows needing an answer" not in page
@@ -1324,7 +1351,11 @@ async def test_consent_in_the_export_is_recorded_against_the_patient(
     consent = consents[0]
     assert consent.purpose == ConsentPurpose.APPOINTMENT_MESSAGING
     assert consent.evidence_kind == EvidenceKind.WRITTEN
-    assert consent.granted_at.date().isoformat() == "2026-03-15"
+    # Compared in Bogota, not in whatever zone the database session happens to
+    # use. `granted_at` is a timestamptz holding midnight Colombian time, so
+    # `.date()` on a server in America/Los_Angeles returns the previous day and
+    # this assertion would fail on a correct value.
+    assert consent.granted_at.astimezone(BOGOTA).date().isoformat() == "2026-03-15"
     # The channel comes from the verified phone binding, not from a spreadsheet.
     assert consent.channel == ConsentChannel.ANY
 
@@ -1921,3 +1952,67 @@ async def test_overwriting_an_existing_patient_is_reported_not_hidden(
     assert sum(body["created"].values()) == 0, "nothing should be new the second time"
     assert "replaced" in body["message"], body["message"]
     assert "overwritten" in body["message"], body["message"]
+
+
+async def test_an_appointment_can_name_a_patient_imported_earlier(
+    scoped: TestClient,
+    session,  # type: ignore[no-untyped-def]
+) -> None:
+    """A reference resolves against the clinic too, not only against this file.
+
+    Clinics send patients one month and appointments the next. `_known_references`
+    loaded doctors from the database but not patients, against its own docstring,
+    so every appointment for a patient imported earlier was reported as naming
+    somebody who does not exist, and the sheet could never be committed.
+    """
+    from src.registry.models import Doctor
+
+    patients = _upload_bytes(
+        scoped,
+        "patients.csv",
+        b"TIPO DOC;IDENTIFICACION;NOMBRES;APELLIDOS;CELULAR\n"
+        b"CC;9988776655;Ana;Perez Gomez;3101234567\n",
+    )
+    scoped.post(f"/onboarding/uploads/{patients['session_id']}/validate")
+    written = scoped.post(f"/onboarding/uploads/{patients['session_id']}/commit")
+    assert written.status_code == 200, written.text
+    assert sum(written.json()["created"].values()) == 1, written.json()["message"]
+
+    await session.commit()
+    await apply_clinic_scope(session, ClinicScope(clinic_id=_clinic_of(scoped)))
+    doctor = await session.scalar(select(Doctor.full_name))
+    assert doctor, "the clinic fixture should already have a doctor"
+
+    # A separate file, naming that patient and the doctor the clinic already has.
+    appointments = _upload_bytes(
+        scoped,
+        "citas.csv",
+        f"IDENTIFICACION;MEDICO;FECHA;HORA\n9988776655;{doctor};2027-03-15;09:00\n".encode(),
+    )
+    report = scoped.post(f"/onboarding/uploads/{appointments['session_id']}/validate").json()
+    blocking = " ".join(report["blocking"])
+    assert "the patient document" not in blocking, blocking
+
+
+async def test_a_hidden_row_is_actually_flagged_not_just_announced(
+    scoped: TestClient,
+) -> None:
+    """The reader promises hidden rows are "flagged for review"; now they are.
+
+    `hidden_row_numbers` was populated and read by nobody, so a hidden row whose
+    cells all converted was committed as valid while the warning said it had been
+    flagged. Hiding a row is not deleting it -- the usual reason is a cancellation
+    the clinic never removed -- so a person has to decide.
+    """
+    body = _upload(scoped, "2_receptionist.xlsx")
+    agenda = next(s for s in body["sheets"] if s["sheet"] == "AGENDA")
+    assert any("hidden row" in w for w in agenda["warnings"]), agenda["warnings"]
+
+    scoped.post(f"/onboarding/uploads/{body['session_id']}/validate")
+    rows = scoped.get(
+        f"/onboarding/uploads/{body['session_id']}/rows",
+        params={"sheet": "AGENDA", "status": "review"},
+    )
+    assert rows.status_code == 200, rows.text
+    flagged = {r["row_number"] for r in rows.json()}
+    assert {15, 16} <= flagged, f"hidden rows were not flagged: {sorted(flagged)}"
