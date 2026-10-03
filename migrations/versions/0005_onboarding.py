@@ -287,15 +287,9 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("row_number", sa.Integer(), nullable=False),
-        # Which sheet the cell came from. Without it, clearing one sheet's log
-        # before revalidating cleared every sheet's.
-        sa.Column("sheet", sa.String(120), nullable=True),
         sa.Column("column_name", sa.String(255), nullable=False),
         sa.Column("target_field", sa.String(80), nullable=True),
         sa.Column("raw_value", sa.Text(), nullable=True),
-        # What a reviewer supplied in place of raw_value. Null unless a person
-        # answered this cell, so the log keeps showing what the file held.
-        sa.Column("corrected_from_review", sa.Text(), nullable=True),
         sa.Column("normalized_value", sa.Text(), nullable=True),
         sa.Column("rule", sa.String(80), nullable=False),
         sa.Column("status", sa.String(20), nullable=False),
